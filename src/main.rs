@@ -1,11 +1,13 @@
 extern crate gdk;
 extern crate gtk;
 extern crate gio;
+extern crate sourceview;
 
 use gtk::prelude::*;
 use gio::prelude::*;
-
 use gtk::*;
+use crate::sourceview::LanguageManagerExt;
+use crate::sourceview::ViewExt;
 
 const STYLE: &str = "
 button {
@@ -62,22 +64,24 @@ fn main() {
         vbox.pack_start(&hbox, false, false, 0);
         vbox.pack_start(&hbox2, false, false, 2);
 
-        let tt = TextTagTable::new();
-        // let gtag = TextTag::new(None);
-        // gtag.set_property_font(Some("monospace 24"));
+        let lm = sourceview::LanguageManager::get_default().unwrap();
+        let python = lm.get_language("python").unwrap();
+        let tb = sourceview::Buffer::new_with_language(&python);
+        let tt = tb.get_tag_table().unwrap();
+
         let tag = TextTag::new(None);
         tag.set_property_editable(false);
         tt.add(&tag);
-        // tt.add(&gtag);
-        let tb = TextBuffer::new(Some(&tt));
-        // let (start, end) = tb.get_bounds();
-        // tb.apply_tag(&gtag, &start, &end);
         let mut iter = tb.get_iter_at_line(0);
         tb.insert(&mut iter, "\n");
         let anchor = tb.create_child_anchor(&mut iter).unwrap();
         tb.insert(&mut iter, "\n");
         tb.apply_tag(&tag, &tb.get_iter_at_line(0), &iter);
-        let tv = TextView::with_buffer(&tb);
+        let tv = sourceview::View::new_with_buffer(&tb);
+        tv.set_auto_indent(true);
+        tv.set_indent_on_tab(true);
+        tv.set_smart_backspace(true);
+        tv.set_indent_width(2);
         tv.add_child_at_anchor(&vbox, &anchor);
         vbox.set_size_request(500, -1);
         window.add(&tv);
