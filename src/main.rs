@@ -3,23 +3,26 @@ extern crate gtk;
 extern crate gio;
 extern crate glib;
 extern crate sourceview;
+extern crate sha2;
 
 use gtk::prelude::*;
 use gio::prelude::*;
 use gtk::*;
-use sourceview::{LanguageManagerExt, ViewExt};
+use sourceview::{LanguageManagerExt, ViewExt, BufferExt};
 use glib::GString;
+use pyo3::prelude::*;
+use sha2::digest::FixedOutput;
+use sha2::digest::generic_array::GenericArray;
+use sha2::Sha256;
 
 use std::cell;
 use std::thread;
+use std::boxed;
 use std::time::Duration;
 use std::sync::mpsc;
 use std::sync::{Mutex, Arc};
 use std::sync::atomic::{Ordering, AtomicBool};
-use python_parser::ast;
 use std::collections::HashMap;
-
-// Note: this will only work with a pure subset of python
 
 const STYLE: &str = "
 button {
@@ -75,30 +78,84 @@ fn add_history_header(tv: &sourceview::View) -> Box {
     return b;
 }
 
-fn process_ast(symbols: &mut HashMap<&str, ast::Statement>, statemenr: ast::Statement) {
-}
+// TODO: Get a hash of ast fields for a parsedname
+// On getting a parsedName, make an entry in the table
+// On getting a different entry for parsedName, make a history header.
 
 struct Work {
     do_work: AtomicBool,
-    content: Mutex<Option<GString>>
+    die: AtomicBool,
+    content: Mutex<Option<(GString,i32)>>
 }
 
-fn spawn_parser(receiver: mpsc::Receiver<GString>) {
-    let work = Arc::new(Work{do_work: AtomicBool::new(false), content: Mutex::new(None)});
+type Hash = GenericArray<u8, <Sha256 as FixedOutput>::OutputSize>;
+
+// All AST nodes are assumed by be scheme-like cons cells
+#[derive(Debug)]
+enum PyExpr {
+    PyRef(Hash),
+    PyCall(boxed::Box<PyExpr>, Vec<PyExpr>),
+    PyArg(u8) // DeBruijn index
+}
+
+// Every defined variable keeps track of the ast hashes its been assigned
+#[derive(Debug)]
+struct PyDef {
+    ty: Hash,
+    body: PyExpr
+}
+
+// TODO: maybe we can just reference the underlying python string instead?
+#[derive(Debug)]
+struct ParsedName {
+    name: String,
+    ast: PyDef,
+    line: i32
+}
+
+fn to_pydef(_body: Vec<&PyAny>)-> PyResult<PyDef> {
+    unimplemented!();
+}
+
+fn py_parse<'a>(ast: &'a PyModule, code: &str, offset: i32) ->PyResult<Vec<ParsedName>>  {
+    let val : Vec<&PyAny> = ast.call1("parse", (code,))?.getattr("body")?.extract()?;
+    val.iter().map(|x| {
+        let l : i32 = x.getattr("lineno")?.extract()?;
+        Ok(ParsedName {
+            name: x.getattr("name")?.extract()?,
+            ast: to_pydef(x.getattr("body")?.extract()?)?,
+            line: l + offset - 1
+    })}).collect()
+}
+
+fn spawn_parser(receiver: mpsc::Receiver<(GString, i32)>, sender: glib::Sender<String>) {
+    let work = Arc::new(Work{
+        do_work: AtomicBool::new(false),
+        die: AtomicBool::new(false),
+        content: Mutex::new(None)
+    });
     let work1 = Arc::clone(&work);
     thread::spawn(move || {
-        let mut m = HashMap::new();
+        let gil = Python::acquire_gil();
+        let py = gil.python();
+        let ast = PyModule::import(py, "ast").unwrap();
         loop {
             {
+                if work1.die.load(Ordering::Relaxed) {
+                    break
+                }
                 work1.do_work.store(work1.content.lock().unwrap().is_some(), Ordering::Relaxed);
             }
-            thread::sleep(Duration::from_millis(300));
+            thread::sleep(Duration::from_millis(500));
             if work1.do_work.load(Ordering::Relaxed) {
                 let lock = work1.content.lock();
-                let code = lock.unwrap().take().unwrap();
-                let (_, ss) = python_parser::file_input(python_parser::make_strspan(code.as_str())).unwrap();
-                for s in ss {
-                    process_ast(&mut m, s);
+                let (code, offset) = lock.unwrap().take().unwrap();
+                match py_parse(ast, code.as_str(), offset) {
+                    Ok(val) => {
+                        let result = format!("{:?}", val);
+                        sender.send(result).unwrap();
+                    },
+                    Err(e) => e.print(py)
                 }
             }
         }
@@ -106,11 +163,14 @@ fn spawn_parser(receiver: mpsc::Receiver<GString>) {
     let work2 = Arc::clone(&work);
     thread::spawn(move || {
         loop {
-            let a = receiver.recv().unwrap();
-            {
-                *(work2.content.lock().unwrap()) = Some(a);
+            let a = receiver.recv();
+            match a {
+                Ok(o) => {
+                    *(work2.content.lock().unwrap()) = Some(o);
+                    work2.do_work.store(false, Ordering::Relaxed);
+                },
+                _ => work2.die.store(true, Ordering::Relaxed)
             }
-            work2.do_work.store(false, Ordering::Relaxed);
 
         }
     });
@@ -133,18 +193,33 @@ fn build_ui(app: &Application) {
     let (sender, receiver) = mpsc::sync_channel(1);
     let sendref = cell::RefCell::new(sender);
 
-    spawn_parser(receiver);
-    tb.connect_changed(move |tba| {
-      let (start, end) = tba.get_bounds();
-      let thestr = tba.get_text(&start, &end, true).unwrap();
-      sendref.borrow_mut().send(thestr).unwrap();
+    let (tx, rx) = glib::MainContext::channel(glib::PRIORITY_DEFAULT);
+    spawn_parser(receiver, tx);
+
+    rx.attach(None, move |nm| {
+        eprintln!("GOT {}", nm);
+        glib::Continue(true)
     });
 
-    let b = add_history_header(&tv);
-    build_branch_toggle(&b);
-    
-    window.add(&tv);
-    window.show_all();
+    tb.connect_highlight_updated(move |tba, start, end| {
+        let mut itrb = start.clone();
+        if !tba.iter_has_context_class(&itrb, "funcdef") {
+            if tba.iter_backward_to_context_class_toggle(&mut itrb, "funcdef") {
+                if !tba.iter_has_context_class(&itrb, "funcdef") {
+                    tba.iter_backward_to_context_class_toggle(&mut itrb, "funcdef");
+                }
+            }
+        }
+        let mut itrf = end.clone();
+        tba.iter_forward_to_context_class_toggle(&mut itrf, "funcdef");
+        match tba.get_text(&itrb, &itrf, true) {
+            Some(s) => sendref.borrow_mut().send((s, itrb.get_line())).unwrap(),
+            None => ()
+        }
+    });
+
+   window.add(&tv);
+   window.show_all();
 }
 
 fn main() {

@@ -9,7 +9,8 @@ edition = "2018"
 [dependencies]
 gdk = "^0"
 glib = ""
-python-parser = "^0"
+pyo3 = "0.11.1"
+sha2 = ""
 
 [dependencies.gtk]
 version = "0.9.0"
