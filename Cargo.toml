@@ -11,6 +11,13 @@ gdk = "^0"
 glib = ""
 pyo3 = "0.11.1"
 sha2 = ""
+bimap = ""
+bincode = ""
+
+
+[dependencies.serde]
+version = "1.0"
+features = ["derive"]
 
 [dependencies.gtk]
 version = "0.9.0"
