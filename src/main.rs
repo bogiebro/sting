@@ -1,18 +1,23 @@
 extern crate gdk;
 extern crate gtk;
 extern crate gio;
+#[macro_use]
 extern crate glib;
 extern crate sourceview;
 extern crate sha2;
 extern crate bimap;
 extern crate bincode;
 extern crate serde;
+extern crate once_cell;
 
 use gtk::prelude::*;
 use gio::prelude::*;
 use gtk::*;
 use sourceview::{LanguageManagerExt, ViewExt, BufferExt};
 use glib::GString;
+use glib::subclass;
+use glib::translate::*;
+use gtk::subclass::prelude::*;
 use pyo3::prelude::*;
 use pyo3::exceptions;
 use pyo3::conversion::AsPyPointer;
@@ -30,6 +35,7 @@ use std::sync::mpsc;
 use std::sync::{Mutex, Arc};
 use std::sync::atomic::{Ordering, AtomicBool};
 use std::collections::HashMap;
+use once_cell::unsync::OnceCell;
 
 const STYLE: &str = "
 button {
@@ -55,34 +61,107 @@ fn build_branch_toggle(vbox: &Box) {
     vbox.pack_start(&hbox, false, false, 2);
 }
 
-fn make_header() -> Box {
-    let vbox = Box::new(Orientation::Vertical, 0);
-    let hbox = Box::new(Orientation::Horizontal, 0);
-    let adj = Adjustment::new(0., 0., 1., 1., 1., 1.);
-    let scale = Scale::new(Orientation::Horizontal, Some(&adj));
-    scale.set_draw_value(false);
-    hbox.pack_start(&scale, true, true, 0);
-    let btn = Button::with_label("Branch");
-    hbox.pack_end(&btn, false, false, 2);
-    vbox.pack_end(&hbox, false, false, 0);
-    vbox.set_size_request(500, -1);
-    return vbox;
+pub struct HistoryPriv {
+    adjustment: OnceCell<Adjustment>
 }
 
-fn add_history_header(tv: &sourceview::View) -> Box {
+impl HistoryPriv {
+    fn set_len(&self, len: u32) {
+        let lenf = len as f64;
+        let adj = self.adjustment.get().unwrap();
+        adj.set_upper(lenf);
+        adj.set_value(lenf);
+    }
+}
+
+impl ObjectImpl for HistoryPriv {
+    glib_object_impl!();
+
+    fn constructed(&self, obj: &glib::Object) {
+        self.parent_constructed(obj);
+        let adj = Adjustment::new(1., 0., 1., 1., 1., 1.);
+        adj.connect_value_changed(|a| {
+            let old_val = a.get_value();
+            let new_val = old_val.round();
+            if old_val != new_val {
+                a.set_value(new_val);
+            }
+        });
+        self.adjustment.set(adj).unwrap();
+        let self_ = obj.downcast_ref::<HistoryHeader>().unwrap();
+        let scale = Scale::new(Orientation::Horizontal, Some(self.adjustment.get().unwrap()));
+        scale.set_draw_value(false);
+        self_.set_orientation(Orientation::Horizontal);
+        self_.pack_start(&scale, true, true, 0);
+        let btn = Button::with_label("Branch");
+        self_.pack_end(&btn, false, false, 2);
+        self_.set_size_request(500, -1);
+    }
+}
+
+impl ObjectSubclass for HistoryPriv {
+    const NAME: &'static str = "HistoryHeader";
+    type ParentType = gtk::Box;
+    type Instance = subclass::simple::InstanceStruct<Self>;
+    type Class = subclass::simple::ClassStruct<Self>;
+    glib_object_subclass!();
+
+    fn new() -> Self {
+        Self {
+            adjustment: OnceCell::new(),
+        }
+    }
+}
+
+glib_wrapper! {
+    pub struct HistoryHeader(
+        Object<subclass::simple::InstanceStruct<HistoryPriv>,
+        subclass::simple::ClassStruct<HistoryPriv>,
+        HistoryHeaderClass>)
+        @extends Box, Orientable, Container, Widget;
+
+    match fn {
+        get_type => || HistoryPriv::get_type().to_glib(),
+    }
+}
+
+impl BoxImpl for HistoryPriv {}
+impl ContainerImpl for HistoryPriv {}
+impl WidgetImpl for HistoryPriv {}
+
+impl HistoryHeader {
+    pub fn new() -> HistoryHeader {
+        glib::Object::new(Self::static_type(), &[])
+          .expect("Failed to create HistoryHeader Widget")
+          .downcast()
+          .expect("Created HistoryHeader Widget is of wrong type")
+    }
+}
+
+fn add_history_header(tv: &sourceview::View, nm: ParsedName) {
     let tb = tv.get_buffer().unwrap();
-    let tt = tb.get_tag_table().unwrap();
-    let tag = TextTag::new(None);
-    tag.set_property_editable(false);
-    tt.add(&tag);
-    let mut iter = tb.get_iter_at_line(0);
-    tb.insert(&mut iter, "\n");
-    let anchor = tb.create_child_anchor(&mut iter).unwrap();
-    tb.insert(&mut iter, "\n");
-    tb.apply_tag(&tag, &tb.get_iter_at_line(0), &iter);
-    let b = make_header();
-    tv.add_child_at_anchor(&b, &anchor);
-    return b;
+    let child_iter = tb.get_iter_at_line(nm.line - 1);
+    match child_iter.get_child_anchor() {
+        Some(children) => HistoryPriv::from_instance(&children.get_widgets()[0]).set_len(nm.len),
+        None => {
+            eprintln!("NO CHILD FOUND");
+            let mut iter = tb.get_iter_at_line(nm.line);
+            eprintln!("ADDING AT {}", nm.line);
+            let tt = tb.get_tag_table().unwrap();
+            let tag = TextTag::new(None);
+            tag.set_property_editable(false);
+            // tag.set_property_invisible(true);
+            tt.add(&tag);
+            tb.insert(&mut iter, "\n");
+            let anchor = tb.create_child_anchor(&mut iter).unwrap();
+            tb.insert(&mut iter, "\n");
+            tb.apply_tag(&tag, &tb.get_iter_at_line(0), &iter);
+            let b = HistoryHeader::new();
+            HistoryPriv::from_instance(&b).set_len(nm.len);
+            tv.add_child_at_anchor(&b, &anchor);
+            b.show_all();
+        }
+    }
 }
 
 type Hash = [u8; 32];
@@ -99,29 +178,43 @@ enum PyExpr {
 
 #[derive(Debug)]
 struct ParsedName {
-    name: String,
-    args: Vec<String>,
     hash: Hash,
+    len: u32,
     line: i32
 }
 
 struct PyState {
 
-    // This will store every definition ever made in the history of the program
+    // Stores every definition ever made in the history of the program
     defs: HashMap<Hash, PyExpr>,
 
-    // This allows us to look up previously hashed subexpressions when parsing,
+    // Allows us to look up previously hashed subexpressions when parsing,
     // and controls when we display ASTs using symbols instead of inlining
     names: BiMap<String, Hash>,
 
-    // This allows propagating a new definition to all exprs that used the old one
+    // Allows propagating a new definition to all exprs that used the old one
     dependents: HashMap<Hash, Vec<Hash>>,
 
-    // This allows us to replace something we previously assumed was a primitive
+    // What is the previous definition historically?
+    prev: HashMap<Hash, Hash>,
+
+    // How long is the chain of hashes ending at this hash?
+    // Not all hashes have entries- this is just a cache for branch tips
+    len: HashMap<Hash, u32>,
+
+    // Maps from name to branch to tip
+    branches: HashMap<String, HashMap<String, Hash>>,
+
+    // Allows us to replace something we previously assumed was a primitive
     // with a user defined hash
     prim_dependents: HashMap<String, Vec<Hash>>
 }
 
+fn hash_expr(st: &mut PyState, expr: PyExpr) -> Hash {
+    let hash = Sha256::digest(&bincode::serialize(&expr).unwrap()).into();
+    st.defs.insert(hash, expr);
+    hash
+}
 
 fn hash_val(ptrs: PyPtrs, st: &mut PyState, val: &PyAny, args: &Vec<String>) -> PyResult<Hash> {
     let ty : *const ffi::PyObject = val.get_type().as_ptr();
@@ -130,36 +223,61 @@ fn hash_val(ptrs: PyPtrs, st: &mut PyState, val: &PyAny, args: &Vec<String>) -> 
             hash_val(ptrs, st, a?, args)
         }).collect::<PyResult<Vec<Hash>>>()?;
         let expr = PyExpr::Call(hash_val(ptrs, st, val.getattr("func")?, args)?, call_args);
-        Ok(Sha256::digest(&bincode::serialize(&expr).unwrap()).into())
+        Ok(hash_expr(st, expr))
     } else if ty == ptrs.name_ty {
         let name = val.getattr("id")?.extract()?;
         match args.iter().position(|x| x == &name) {
             Some(ix) => Ok(Sha256::digest(&bincode::serialize(&PyExpr::DeBruijn(ix)).unwrap()).into()),
             None => match st.names.get_by_left(&name) {
                 Some(&h) => Ok(h),
-                None => {
-                    Ok(Sha256::digest(&bincode::serialize(&PyExpr::Prim(name)).unwrap()).into())
-                }
+                None => Ok(hash_expr(st, PyExpr::Prim(name)))
             }
         }
     } else if ty == ptrs.bin_ty {
         let left = hash_val(ptrs, st, val.getattr("left")?, args)?;
         let right = hash_val(ptrs, st, val.getattr("right")?, args)?;
         let op = String::from(val.getattr("op")?.get_type().name());
-        Ok(Sha256::digest(&bincode::serialize(&PyExpr::BinOp(op, left, right)).unwrap()).into())
+        Ok(hash_expr(st, PyExpr::BinOp(op, left, right)))
     } else if ty == ptrs.const_ty {
         let cval = val.getattr("value")?;
         let expr = cval.extract().map(PyExpr::ConstInt).or(
             cval.extract().map(PyExpr::ConstFloat))?;
-        Ok(Sha256::digest(&bincode::serialize(&expr).unwrap()).into())
+        Ok(hash_expr(st, expr))
     } else {
         let msg = format!("Unknown ast node with type {}", val.get_type().repr()?);
         exceptions::TypeError::into(msg)
     }
 }
 
+fn update_name(st: &mut PyState, name: String, val: Hash, prev: Option<Hash>) -> u32 {
+    st.names.insert(name, val);
+    match prev {
+        None => {
+            st.len.insert(val, 1);
+            1
+        }
+        Some(h) => {
+            let len = st.len.get(&h).unwrap() + 1;
+            st.len.insert(val, len);
+            len
+        }
+    }
+}
+
+fn add_def(st: &mut PyState, parsed_names: &mut Vec<ParsedName>, name: String, hash: Hash, line: i32) {
+    match st.names.get_by_left(&name) {
+        None => { update_name(st, name, hash, None); },
+        Some(&h) => if h != hash {
+            parsed_names.push(ParsedName{
+                line: line,
+                hash: hash,
+                len: update_name(st, name, hash, Some(h))
+            })
+        }
+    }
+}
+
 fn hash_def(ptrs: PyPtrs, st: &mut PyState, def: &PyAny, offset: i32) -> PyResult<Vec<ParsedName>> {
-    let line : i32 = def.getattr("lineno")?.extract()?;
     let args = def.getattr("args")?.getattr("args")?.iter()?.map(|x| {
         Ok(x?.getattr("arg")?.extract()?)
     }).collect::<PyResult<Vec<String>>>()?;
@@ -168,22 +286,15 @@ fn hash_def(ptrs: PyPtrs, st: &mut PyState, def: &PyAny, offset: i32) -> PyResul
         let b = b_r?;
         let ty : *const ffi::PyObject = b.get_type().as_ptr();
         if ty == ptrs.asn_ty {
-            let name : String = b.getattr("targets")?.get_item(0)?.getattr("id")?.extract()?;
+            let name = b.getattr("targets")?.get_item(0)?.getattr("id")?.extract()?;
             let val = hash_val(ptrs, st, b.getattr("value")?, &args)?;
-            st.names.insert(name.clone(), val);
-            parsed_names.push(ParsedName{
-                name: name,
-                line: line + offset - 1,
-                hash: hash_val(ptrs, st, b.getattr("value")?, &args)?,
-                args: Vec::new()
-            });
+            let line : i32 = b.getattr("lineno")?.extract()?;
+            add_def(st, &mut parsed_names, name, val, line + offset - 1);
         } else if ty == ptrs.ret_ty {
-            parsed_names.push(ParsedName {
-                name: def.getattr("name")?.extract()?,
-                line: line + offset - 1,
-                hash: hash_val(ptrs, st, b.getattr("value")?, &args)?,
-                args: args
-            });
+            let name = def.getattr("name")?.extract()?;
+            let val = hash_val(ptrs, st, b.getattr("value")?, &args)?;
+            let line : i32 = def.getattr("lineno")?.extract()?;
+            add_def(st, &mut parsed_names, name, val, line + offset - 1);
             return Ok(parsed_names);
         }
     }
@@ -214,7 +325,7 @@ struct Work {
     content: Mutex<Option<(GString,i32)>>
 }
 
-fn spawn_parser(receiver: mpsc::Receiver<(GString, i32)>, sender: glib::Sender<String>) {
+fn spawn_parser(receiver: mpsc::Receiver<(GString, i32)>, sender: glib::Sender<ParsedName>) {
     let work = Arc::new(Work{
         do_work: AtomicBool::new(false),
         die: AtomicBool::new(false),
@@ -226,7 +337,10 @@ fn spawn_parser(receiver: mpsc::Receiver<(GString, i32)>, sender: glib::Sender<S
             defs: HashMap::new(),
             names: BiMap::new(),
             dependents: HashMap::new(),
-            prim_dependents: HashMap::new()
+            prim_dependents: HashMap::new(),
+            prev: HashMap::new(),
+            len: HashMap::new(),
+            branches: HashMap::new()
         };
         let gil = Python::acquire_gil();
         let py = gil.python();
@@ -252,8 +366,11 @@ fn spawn_parser(receiver: mpsc::Receiver<(GString, i32)>, sender: glib::Sender<S
                 let (code, offset) = lock.unwrap().take().unwrap();
                 match py_parse(ptrs, &mut st, ast, code.as_str(), offset) {
                     Ok(val) => {
-                        let result = format!("{:?}", val);
-                        sender.send(result).unwrap();
+                        for v in val {
+                            for vv in v{
+                                sender.send(vv).unwrap();
+                            }
+                        }
                     },
                     Err(e) => e.print(py)
                 }
@@ -276,10 +393,9 @@ fn spawn_parser(receiver: mpsc::Receiver<(GString, i32)>, sender: glib::Sender<S
     });
 }
 
-
 fn build_ui(app: &Application) {
     let window = ApplicationWindow::new(app);
-    window.set_title("Historian");
+    window.set_title("Sting");
     window.set_default_size(350, 70);
     let lm = sourceview::LanguageManager::get_default().unwrap();
     let python = lm.get_language("python").unwrap();
@@ -296,8 +412,10 @@ fn build_ui(app: &Application) {
     let (tx, rx) = glib::MainContext::channel(glib::PRIORITY_DEFAULT);
     spawn_parser(receiver, tx);
 
+    let tv2 = tv.clone();
     rx.attach(None, move |nm| {
-        eprintln!("GOT {}", nm);
+        // eprintln!("GOT {:?}", nm);
+        add_history_header(&tv2, nm);
         glib::Continue(true)
     });
 
@@ -324,7 +442,7 @@ fn build_ui(app: &Application) {
 
 fn main() {
     let application = Application::new(
-        Some("com.github.gtk-rs.examples.basic"),
+        Some("com.sting.python"),
         Default::default(),
     ).expect("failed to initialize GTK application");
 

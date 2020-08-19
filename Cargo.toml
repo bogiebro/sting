@@ -13,7 +13,8 @@ pyo3 = "0.11.1"
 sha2 = ""
 bimap = ""
 bincode = ""
-
+sequence_trie = ""
+once_cell = ""
 
 [dependencies.serde]
 version = "1.0"
