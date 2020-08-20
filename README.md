@@ -73,19 +73,29 @@ To show an old version or alternate branch of a definition, we swap outs its has
 
 Let's say we want to merge history B into A.
 
-Merging the *log* is trivial. If A and B have log keys in common, they must map to the same definition, so there's never any conflict. The *chain*, *view*, *namespace*, and *branch map* are clearly commutative monoids. The active branch stays unchanged by a merge. 
+Merging the *log* is trivial. If A and B have log keys in common, they must map to the same definition, so there's never any conflict. The *chain*, *view*, *namespace*, and *branch map* are clearly commutative monoids. The active branch is unchanged by a merge. 
 
 
 
-### Collaborative Editing
+### Real Time Collaborative Editing
 
-As merges are always free from conflicts, Sting can automatically merge in history from other users whenever new definitions are made. This allows a google-docs like collaborative editing experience.
+As merges are always free from conflicts, Sting can automatically merge in history from other users whenever new definitions are made. This allows a google-docs like real-time collaborative editing experience. 
 
 
 
-## Editor Interface
+## Editing Interface
 
-Editor windows show a subset of the definitions in the *view* set for editing. The interface allows users to add other members of *view* into a buffer. There are other controls for removing a definition from the buffer while keeping it in *view*. Deleting a definition from the buffer also remove it from *view*. 
+
+
+### Editing an Old Definition
+
+Editor windows show a subset of the definitions in the *view* set for editing. This set is called the *buffer*. A fuzzy search menu, similar to the "Go to symbol" prompt in Sublime Text and Textmate, allows users to add definitions into the buffer. It will be triggered with a hot-key or toolbar button. The prompt lists definitions in *view* first. Those that are no longer in *view* are marked with a different formatting. If the user selects a definition that is not in *view*, this definition is both added to the buffer and added to *view*. Deleting a definition from the buffer also removes it from *view*. 
+
+
+
+### Adding a New Definition
+
+Any new definitions entered into the buffer will get added to the *view* as well. 
 
 
 
@@ -93,7 +103,7 @@ Editor windows show a subset of the definitions in the *view* set for editing. T
 
 As Sting programs are not stored as text files in the file-system, as in conventional Python programs, they cannot rely on filenames to separate modules. Instead, Sting adds a module declaration syntax. A line like
 
-```haskell
+```python
 module top_module.inner_module
 ```
 
@@ -107,9 +117,29 @@ It is possible for a single name to apply to multiple hashes. This can happen wh
 
 
 
+### Removing a Definition from the Buffer
+
+If you want to remove a definition from the buffer without removing it from *view*, this will be done with a hot key or toolbar button. 
+
+
+
+## Status Indicators
+
+To the left of the code, as in many editors, is the gutter. This displays indicator icons next to lines that require special attention from the user. 
+
+**Error Indicators** appear as a red dot. When the user's cursor rests on a line with an error indicator, the associated error is shown in the *info panel* at the bottom of the window. This applies to both compile-time errors (syntax and type errors) as well as errors that occurred while running the code. 
+
+**Merge conflict** indicators appear whenever a function is using an older definition than the one shown in *view*. This indicates that the given line leads to failing tests when used with the newer definition. When the user's cursor rests on a line with a merge conflict indicator, the errors that occurred when trying to use the newer definition are shown in the *info panel*. When the indicator is toggled on and off, it switches between a working version of the line that uses the old definition, and a failing version of the line that uses the new definition. Switching to the failing version will result in more error indicators being displayed (those associated with the failing upgrade).
+
+**Callstack parent** indicators appear whenever the given line is a parent of any of the contexts in the *context panel*. Clicking these indicators will toggle whether the context panel should filter its list of contexts to only include those with the given parent. 
+
+**Callstack child** indicators appear whenever the given line is a child of any of the contexts in the *context panel*. Clicking these indicators will toggle whether the context panel should filter its list of contexts to only those that include the given child. If a given line occurs as both a parent and a child of the selection in the context panel, Sting will default to showing the **callstack parent** indicator. 
+
+
+
 ## Running Code
 
-Sting gives users a unified interface for writing and running code, inspired by [Unison](https://www.unisonweb.org/) and [REPLugger](https://www.youtube.com/watch?v=F8p5bj01UWk). 
+Sting gives users a unified interface for writing and running code, inspired by [IPython](),  [Unison](https://www.unisonweb.org/) and [REPLugger](https://www.youtube.com/watch?v=F8p5bj01UWk). 
 
 
 
@@ -123,7 +153,7 @@ Lines that begin with a pipe character are interpreted as expressions to run. Th
 
 These are definitions, and are stored in the *log* and *view* just like any other definition. 
 
-When these lines are placed within a function, they run every time their parent function is run. The results are shown in a search-able table. For example, the following code will show tables with the `sin` and `cos` values of 3 and 4 along with `foo` values. 
+When these lines are placed within a function, they run every time their parent function is run. The results are shown in line, depending on the arguments chosen in the *context panel*. For example, the following code will allow users to check the the `sin` and `cos` values of 3 and 4 along with `foo` values. 
 
 ```python
 def foo(x):
@@ -134,15 +164,27 @@ def foo(x):
 | foo(4)
 ```
 
-These tables can be filtered using *context points*. The user can select another line of the program. This filters the tables to only show calls with this line in their call-stacks. 
-
 When these pipe-statements include an assert statement, they can be interpreted as unit tests. 
+
+Pipe statements have entries in the *namespace* as well. They are named based on their enclosing function. In the example above, the calls to `| foo(3)` and `| foo(4)` would both have name `_pipe_`, and the calls to `| sin(x)` and `| cos(x)` would both have name `foo._pipe_`. 
+
+
+
+### The Context Panel
+
+When a pipe statement is nested inside a function that has been called with multiple different sets of arguments, Sting will not know which result to show inline. Unless the user takes action, it will not display anything. A separate panel on the right side of the editor window will list all the invocations of the function containing the user's cursor, and allows the user to select which invocation they wish to see.
+
+This list is searchable, using a search dialog at the top of the context panel, which filters the visible invocations to those that match the search string as it is typed. It is also filtered by the **callstack parent** and **callstack child** indicators mentioned previously. An active **callstack parent** indicator will filter entries in the context panel to those in the callstack of invocations on the line with the active indicator. An active **callstack child** indicator filter entries in the context panel to those with a callstack that includes the line with the active indicator. 
+
+Selecting an entry in the context panel also affects the display of pipe statements for functions that do not currently contain the user's cursor. Other functions that occur in the callstack of the selected invocation will show the results from when they are called during this invocation. 
+
+The context panel will also show the callstack for the selected invocation below the list of invocations. Clicking on a line in the callstack will move the user's cursor to that line of the program. 
 
 
 
 ### Widgets
 
-Tests and functions can also be re-triggered if any of their inputs come from an interactive widget. This will include IPython-style sliders. 
+Tests and functions can also be re-triggered if any of their inputs come from an interactive widget. These will be very similar to the interactive widgets in IPython notebooks. A special python library can be imported, something like `from sting.widgets import slider`.  Definitions can then be of the form `x=slider(min=0, max=10)`. 
 
 
 
@@ -160,3 +202,4 @@ Pipe statements can also specify that a remote server should execute the line in
 |@remote_name do_gpu_computation()
 ```
 
+Inline results, callstacks in the context panel, and indicators in the gutter will all be displayed for remote executions exactly the same way as they are for local executions. 
