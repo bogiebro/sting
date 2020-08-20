@@ -35,7 +35,6 @@ use std::sync::mpsc;
 use std::sync::{Mutex, Arc};
 use std::sync::atomic::{Ordering, AtomicBool};
 use std::collections::HashMap;
-use once_cell::unsync::OnceCell;
 
 const STYLE: &str = "
 button {
@@ -61,88 +60,41 @@ fn build_branch_toggle(vbox: &Box) {
     vbox.pack_start(&hbox, false, false, 2);
 }
 
-pub struct HistoryPriv {
-    adjustment: OnceCell<Adjustment>
-}
-
-impl HistoryPriv {
-    fn set_len(&self, len: u32) {
-        let lenf = len as f64;
-        let adj = self.adjustment.get().unwrap();
-        adj.set_upper(lenf);
-        adj.set_value(lenf);
-    }
-}
-
-impl ObjectImpl for HistoryPriv {
-    glib_object_impl!();
-
-    fn constructed(&self, obj: &glib::Object) {
-        self.parent_constructed(obj);
-        let adj = Adjustment::new(1., 0., 1., 1., 1., 1.);
-        adj.connect_value_changed(|a| {
-            let old_val = a.get_value();
-            let new_val = old_val.round();
-            if old_val != new_val {
-                a.set_value(new_val);
-            }
-        });
-        self.adjustment.set(adj).unwrap();
-        let self_ = obj.downcast_ref::<HistoryHeader>().unwrap();
-        let scale = Scale::new(Orientation::Horizontal, Some(self.adjustment.get().unwrap()));
-        scale.set_draw_value(false);
-        self_.set_orientation(Orientation::Horizontal);
-        self_.pack_start(&scale, true, true, 0);
-        let btn = Button::with_label("Branch");
-        self_.pack_end(&btn, false, false, 2);
-        self_.set_size_request(500, -1);
-    }
-}
-
-impl ObjectSubclass for HistoryPriv {
-    const NAME: &'static str = "HistoryHeader";
-    type ParentType = gtk::Box;
-    type Instance = subclass::simple::InstanceStruct<Self>;
-    type Class = subclass::simple::ClassStruct<Self>;
-    glib_object_subclass!();
-
-    fn new() -> Self {
-        Self {
-            adjustment: OnceCell::new(),
+fn new_history_header(lenf: f64) -> Box {
+    let hbox = Box::new(Orientation::Horizontal, 0);
+    let adj = Adjustment::new(lenf, 0., lenf, 1., 1., 1.);
+    adj.connect_value_changed(|a| {
+        let old_val = a.get_value();
+        let new_val = old_val.round();
+        if old_val != new_val {
+            a.set_value(new_val);
         }
+    });
+    let scale = Scale::new(Orientation::Horizontal, Some(&adj));
+    scale.set_draw_value(false);
+    hbox.pack_start(&scale, true, true, 0);
+    let btn = Button::with_label("Branch");
+    hbox.pack_end(&btn, false, false, 2);
+    hbox.set_size_request(500, -1);
+    unsafe {
+        hbox.set_data("adj", adj);
     }
-}
-
-glib_wrapper! {
-    pub struct HistoryHeader(
-        Object<subclass::simple::InstanceStruct<HistoryPriv>,
-        subclass::simple::ClassStruct<HistoryPriv>,
-        HistoryHeaderClass>)
-        @extends Box, Orientable, Container, Widget;
-
-    match fn {
-        get_type => || HistoryPriv::get_type().to_glib(),
-    }
-}
-
-impl BoxImpl for HistoryPriv {}
-impl ContainerImpl for HistoryPriv {}
-impl WidgetImpl for HistoryPriv {}
-
-impl HistoryHeader {
-    pub fn new() -> HistoryHeader {
-        glib::Object::new(Self::static_type(), &[])
-          .expect("Failed to create HistoryHeader Widget")
-          .downcast()
-          .expect("Created HistoryHeader Widget is of wrong type")
-    }
+    hbox
 }
 
 fn add_history_header(tv: &sourceview::View, nm: ParsedName) {
+    let lenf = nm.len as f64;
     let tb = tv.get_buffer().unwrap();
     let child_iter = tb.get_iter_at_line(nm.line - 1);
     match child_iter.get_child_anchor() {
-        Some(children) => HistoryPriv::from_instance(&children.get_widgets()[0]).set_len(nm.len),
+        Some(children) => {
+            let b = &children.get_widgets()[0];
+            unsafe {
+                let adj : &Adjustment = b.get_data("adj").unwrap();
+                adj.set_upper(lenf);
+                adj.set_value(lenf);
+            }
+        }
         None => {
             eprintln!("NO CHILD FOUND");
             let mut iter = tb.get_iter_at_line(nm.line);
@@ -156,8 +108,7 @@ fn add_history_header(tv: &sourceview::View, nm: ParsedName) {
             let anchor = tb.create_child_anchor(&mut iter).unwrap();
             tb.insert(&mut iter, "\n");
             tb.apply_tag(&tag, &tb.get_iter_at_line(0), &iter);
-            let b = HistoryHeader::new();
-            HistoryPriv::from_instance(&b).set_len(nm.len);
+            let b = new_history_header(lenf);
             tv.add_child_at_anchor(&b, &anchor);
             b.show_all();
         }
