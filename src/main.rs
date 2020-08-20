@@ -357,14 +357,14 @@ fn build_ui(app: &Application) {
     tv.set_smart_backspace(true);
     tv.set_indent_width(2);
 
-    let (sender, receiver) = mpsc::sync_channel(1);
-    let sendref = cell::RefCell::new(sender);
+    let (new_input_tx, new_input_rx) = mpsc::sync_channel(1);
+    let new_input_tx_cell = cell::RefCell::new(new_input_tx);
 
-    let (tx, rx) = glib::MainContext::channel(glib::PRIORITY_DEFAULT);
-    spawn_parser(receiver, tx);
+    let (def_changed_tx, def_changed_rx) = glib::MainContext::channel(glib::PRIORITY_DEFAULT);
+    spawn_parser(new_input_rx, def_changed_tx);
 
     let tv2 = tv.clone();
-    rx.attach(None, move |nm| {
+    def_changed_rx.attach(None, move |nm| {
         // eprintln!("GOT {:?}", nm);
         add_history_header(&tv2, nm);
         glib::Continue(true)
@@ -382,7 +382,7 @@ fn build_ui(app: &Application) {
         let mut itrf = end.clone();
         tba.iter_forward_to_context_class_toggle(&mut itrf, "funcdef");
         match tba.get_text(&itrb, &itrf, true) {
-            Some(s) => sendref.borrow_mut().send((s, itrb.get_line())).unwrap(),
+            Some(s) => new_input_tx_cell.borrow_mut().send((s, itrb.get_line())).unwrap(),
             None => ()
         }
     });
