@@ -51,7 +51,8 @@ fn build_branch_toggle(vbox: &gtk::Box) {
     hbox.pack_start(&r2, false, false, 10);
     vbox.pack_start(&hbox, false, false, 2);}
 
-fn new_history_header(lenf: f64, f: Rc<dyn Fn(u32) -> ()>) -> gtk::Box {
+fn new_history_header(nm: ParsedName, f: Rc<dyn Fn(ParsedName) -> ()>) -> gtk::Box {
+    let lenf = nm.ix as f64;
     let hbox = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     let adj = gtk::Adjustment::new(lenf, 0., lenf, 1., 1., 1.);
     adj.connect_value_changed(move |a| {
@@ -59,7 +60,7 @@ fn new_history_header(lenf: f64, f: Rc<dyn Fn(u32) -> ()>) -> gtk::Box {
         let new_val = old_val.round();
         if old_val != new_val {
             a.set_value(new_val);
-            f(new_val as u32) }});
+            f(ParsedName{ix:(new_val as u32) - nm.ix, ..nm})}});
     let scale = gtk::Scale::new(gtk::Orientation::Horizontal, Some(&adj));
     scale.set_draw_value(false);
     hbox.pack_start(&scale, true, true, 0);
@@ -69,8 +70,8 @@ fn new_history_header(lenf: f64, f: Rc<dyn Fn(u32) -> ()>) -> gtk::Box {
     unsafe {hbox.set_data("adj", adj);}
     hbox}
 
-fn add_history_header(tv: &sourceview::View, nm: ParsedName, f: Rc<dyn Fn(u32) -> ()>) {
-    let lenf = nm.len as f64;
+fn add_history_header(tv: &sourceview::View, nm: ParsedName, f: Rc<dyn Fn(ParsedName) -> ()>) {
+    let lenf = nm.ix as f64;
     let tb = tv.get_buffer().unwrap();
     let child_iter = tb.get_iter_at_line(nm.line - 1);
     match child_iter.get_child_anchor() {
@@ -93,7 +94,7 @@ fn add_history_header(tv: &sourceview::View, nm: ParsedName, f: Rc<dyn Fn(u32) -
             let anchor = tb.create_child_anchor(&mut iter).unwrap();
             tb.insert(&mut iter, "\n");
             tb.apply_tag(&tag, &tb.get_iter_at_line(0), &iter);
-            let b = new_history_header(lenf, f);
+            let b = new_history_header(nm, f);
             tv.add_child_at_anchor(&b, &anchor);
             b.show_all(); }}}
 
@@ -112,7 +113,7 @@ enum PyExpr {
 #[derive(Debug)]
 struct ParsedName {
     hash: Hash,
-    len: u32,
+    ix: u32,
     line: i32
 }
 
@@ -192,7 +193,7 @@ fn add_def(st: &mut PyState, parsed_names: &mut Vec<ParsedName>, name: String, h
             parsed_names.push(ParsedName{
                 line: line,
                 hash: hash,
-                len: update_name(st, name, hash, Some(h))})}}}
+                ix: update_name(st, name, hash, Some(h))})}}}
 
 fn hash_def(ptrs: PyPtrs, st: &mut PyState, def: &PyAny, offset: i32) -> PyResult<Vec<ParsedName>> {
     let args = def.getattr("args")?.getattr("args")?.iter()?.map(|x| {
@@ -279,8 +280,8 @@ fn build_ui(app: &gtk::Application) {
     let work = Arc::new(Work::new());
     let st = Arc::new(Mutex::new(PyState::new()));
 
-    let f = Rc::new(|new_len: u32| {
-        eprintln!("CURRENT IS {}", new_len);
+    let f = Rc::new(|pn| {
+        eprintln!("CURRENT IS {:?}", pn);
     });
 
     let work1 = Arc::clone(&work);
