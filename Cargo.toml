@@ -11,9 +11,7 @@ gdk = "^0"
 glib = ""
 pyo3 = "0.11.1"
 sha2 = ""
-bimap = ""
 bincode = ""
-sequence_trie = ""
 
 [dependencies.serde]
 version = "1.0"

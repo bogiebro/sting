@@ -4,7 +4,6 @@ extern crate gio;
 extern crate glib;
 extern crate sourceview;
 extern crate sha2;
-extern crate bimap;
 extern crate bincode;
 extern crate serde;
 
@@ -17,16 +16,13 @@ use pyo3::exceptions;
 use pyo3::conversion::AsPyPointer;
 use pyo3::ffi;
 use sha2::{Sha256, Digest};
-use bimap::BiMap;
-
 use serde::{Serialize};
-use std::boxed::Box;
 use std::rc::Rc;
 use std::thread;
 use std::time::Duration;
 use std::sync::{Mutex, Arc};
 use std::sync::atomic::{Ordering, AtomicBool};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 const STYLE: &str = "
 button {
@@ -119,12 +115,24 @@ struct ParsedName {
 
 struct PyState {
 
+    // These define the history of the project
+
     // Stores every definition ever made in the history of the program
     defs: HashMap<Hash, PyExpr>,
 
-    // Allows us to look up previously hashed subexpressions when parsing,
-    // and controls when we display ASTs using symbols instead of inlining
-    names: BiMap<String, Hash>,
+    // How to display defs to the user
+    namespace: HashMap<Hash, String>,
+
+    // Children map to parents from which they were derived
+    chain: HashMap<Hash, Hash>,
+
+    // Which definitions are currently active
+    view: HashSet<Hash>,
+
+    // These are convenient caches that can be derived from info above
+
+    // How to interpret names in new definitions
+    names: HashMap<String, Hash>,
 
     // How long is the chain of hashes ending at this hash?
     // Not all hashes have entries- this is just a cache for branch tips
@@ -136,7 +144,10 @@ impl PyState {
     fn new() -> PyState {
         PyState {
             defs: HashMap::new(),
-            names: BiMap::new(),
+            namespace: HashMap::new(),
+            chain: HashMap::new(),
+            view: HashSet::new(),
+            names: HashMap::new(),
             len: HashMap::new()}}
 }
 
@@ -158,7 +169,7 @@ fn hash_val(ptrs: PyPtrs, st: &mut PyState, val: &PyAny, args: &Vec<String>) -> 
         let name = val.getattr("id")?.extract()?;
         match args.iter().position(|x| x == &name) {
             Some(ix) => Ok(Sha256::digest(&bincode::serialize(&PyExpr::DeBruijn(ix)).unwrap()).into()),
-            None => match st.names.get_by_left(&name) {
+            None => match st.names.get(&name) {
                 Some(&h) => Ok(h),
                 None => Ok(hash_expr(st, PyExpr::Prim(name)))}}
     } else if ty == ptrs.bin_ty {
@@ -176,7 +187,9 @@ fn hash_val(ptrs: PyPtrs, st: &mut PyState, val: &PyAny, args: &Vec<String>) -> 
         exceptions::TypeError::into(msg)}}
 
 fn update_name(st: &mut PyState, name: String, val: Hash, prev: Option<Hash>) -> u32 {
-    st.names.insert(name, val);
+    st.names.insert(name.clone(), val);
+    st.namespace.insert(val, name);
+    st.view.insert(val);
     match prev {
         None => {
             st.len.insert(val, 1);
@@ -184,10 +197,11 @@ fn update_name(st: &mut PyState, name: String, val: Hash, prev: Option<Hash>) ->
         Some(h) => {
             let len = st.len.get(&h).unwrap() + 1;
             st.len.insert(val, len);
+            st.chain.insert(val, h);
             len}}}
 
 fn add_def(st: &mut PyState, parsed_names: &mut Vec<ParsedName>, name: String, hash: Hash, line: i32) {
-    match st.names.get_by_left(&name) {
+    match st.names.get(&name) {
         None => { update_name(st, name, hash, None); },
         Some(&h) => if h != hash {
             parsed_names.push(ParsedName{
@@ -213,13 +227,11 @@ fn hash_def(ptrs: PyPtrs, st: &mut PyState, def: &PyAny, offset: i32) -> PyResul
             let val = hash_val(ptrs, st, b.getattr("value")?, &args)?;
             let line : i32 = def.getattr("lineno")?.extract()?;
             add_def(st, &mut parsed_names, name, val, line + offset - 1);
-            return Ok(parsed_names);
-        }
-    }
+            return Ok(parsed_names); }}
     exceptions::TypeError::into("No return statement")}
 
 fn py_parse<'a>(ptrs: PyPtrs, st: &mut PyState, ast: &'a PyModule, code: &str, offset: i32) ->
-        PyResult<Vec<Vec<ParsedName>>> {
+        PyResult<Vec<Vec<>>> {
     ast.call1("parse", (code,))?.getattr("body")?.iter()?.map(|x_r| {
         hash_def(ptrs, st, x_r?, offset)
     }).collect()}
@@ -280,8 +292,14 @@ fn build_ui(app: &gtk::Application) {
     let work = Arc::new(Work::new());
     let st = Arc::new(Mutex::new(PyState::new()));
 
-    let f = Rc::new(|pn| {
-        eprintln!("CURRENT IS {:?}", pn);
+    let st2 = st.clone();
+    let f = Rc::new(move |pn: ParsedName| {
+        let mut h = pn.hash;
+        let raw_st = st2.lock().unwrap();
+        for _ in 1..pn.ix {
+            h = *raw_st.chain.get(&h).unwrap();
+        }
+        eprintln!("CURRENT IS {:?}", h);
     });
 
     let work1 = Arc::clone(&work);
