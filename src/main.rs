@@ -10,7 +10,6 @@ extern crate serde;
 
 use gtk::prelude::*;
 use gio::prelude::*;
-use gtk::*;
 use sourceview::{LanguageManagerExt, ViewExt, BufferExt};
 use glib::GString;
 use pyo3::prelude::*;
@@ -21,6 +20,8 @@ use sha2::{Sha256, Digest};
 use bimap::BiMap;
 
 use serde::{Serialize};
+use std::boxed::Box;
+use std::rc::Rc;
 use std::thread;
 use std::time::Duration;
 use std::sync::{Mutex, Arc};
@@ -41,33 +42,34 @@ scale {
 }
 ";
 
-fn build_branch_toggle(vbox: &Box) {
-    let hbox = Box::new(Orientation::Horizontal, 0);
-    let r1 = RadioButtonBuilder::new().draw_indicator(false).label("A").build();
-    let r2 = RadioButtonBuilder::new().draw_indicator(false).label("B").build();
+fn build_branch_toggle(vbox: &gtk::Box) {
+    let hbox = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    let r1 = gtk::RadioButtonBuilder::new().draw_indicator(false).label("A").build();
+    let r2 = gtk::RadioButtonBuilder::new().draw_indicator(false).label("B").build();
     r2.join_group(Some(&r1));
     hbox.pack_start(&r1, false, false, 10);
     hbox.pack_start(&r2, false, false, 10);
     vbox.pack_start(&hbox, false, false, 2);}
 
-fn new_history_header(lenf: f64) -> Box {
-    let hbox = Box::new(Orientation::Horizontal, 0);
-    let adj = Adjustment::new(lenf, 0., lenf, 1., 1., 1.);
-    adj.connect_value_changed(|a| {
+fn new_history_header(lenf: f64, f: Rc<dyn Fn(u32) -> ()>) -> gtk::Box {
+    let hbox = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    let adj = gtk::Adjustment::new(lenf, 0., lenf, 1., 1., 1.);
+    adj.connect_value_changed(move |a| {
         let old_val = a.get_value();
         let new_val = old_val.round();
         if old_val != new_val {
-            a.set_value(new_val); }});
-    let scale = Scale::new(Orientation::Horizontal, Some(&adj));
+            a.set_value(new_val);
+            f(new_val as u32) }});
+    let scale = gtk::Scale::new(gtk::Orientation::Horizontal, Some(&adj));
     scale.set_draw_value(false);
     hbox.pack_start(&scale, true, true, 0);
-    let btn = Button::with_label("Branch");
+    let btn = gtk::Button::with_label("Branch");
     hbox.pack_end(&btn, false, false, 2);
     hbox.set_size_request(500, -1);
     unsafe {hbox.set_data("adj", adj);}
     hbox}
 
-fn add_history_header(tv: &sourceview::View, nm: ParsedName) {
+fn add_history_header(tv: &sourceview::View, nm: ParsedName, f: Rc<dyn Fn(u32) -> ()>) {
     let lenf = nm.len as f64;
     let tb = tv.get_buffer().unwrap();
     let child_iter = tb.get_iter_at_line(nm.line - 1);
@@ -75,7 +77,7 @@ fn add_history_header(tv: &sourceview::View, nm: ParsedName) {
         Some(children) => {
             let b = &children.get_widgets()[0];
             unsafe {
-                let adj : &Adjustment = b.get_data("adj").unwrap();
+                let adj : &gtk::Adjustment = b.get_data("adj").unwrap();
                 adj.set_upper(lenf);
                 adj.set_value(lenf); }}
         None => {
@@ -83,7 +85,7 @@ fn add_history_header(tv: &sourceview::View, nm: ParsedName) {
             let mut iter = tb.get_iter_at_line(nm.line);
             eprintln!("ADDING AT {}", nm.line);
             let tt = tb.get_tag_table().unwrap();
-            let tag = TextTag::new(None);
+            let tag = gtk::TextTag::new(None);
             tag.set_property_editable(false);
             // tag.set_property_invisible(true);
             tt.add(&tag);
@@ -91,7 +93,7 @@ fn add_history_header(tv: &sourceview::View, nm: ParsedName) {
             let anchor = tb.create_child_anchor(&mut iter).unwrap();
             tb.insert(&mut iter, "\n");
             tb.apply_tag(&tag, &tb.get_iter_at_line(0), &iter);
-            let b = new_history_header(lenf);
+            let b = new_history_header(lenf, f);
             tv.add_child_at_anchor(&b, &anchor);
             b.show_all(); }}}
 
@@ -243,7 +245,6 @@ impl PyPtrs {
             const_ty: (ast.getattr("Constant").unwrap()).as_ptr()}}
 }
 
-
 struct Work {
     do_work: AtomicBool,
     die: AtomicBool,
@@ -264,8 +265,8 @@ fn setup_textview(tv: &sourceview::View) {
     tv.set_smart_backspace(true);
     tv.set_indent_width(2)}
 
-fn build_ui(app: &Application) {
-    let window = ApplicationWindow::new(app);
+fn build_ui(app: &gtk::Application) {
+    let window = gtk::ApplicationWindow::new(app);
     window.set_title("Sting");
     window.set_default_size(350, 70);
     let lm = sourceview::LanguageManager::get_default().unwrap();
@@ -276,10 +277,15 @@ fn build_ui(app: &Application) {
 
     let (def_changed_tx, def_changed_rx) = glib::MainContext::channel(glib::PRIORITY_DEFAULT);
     let work = Arc::new(Work::new());
+    let st = Arc::new(Mutex::new(PyState::new()));
+
+    let f = Rc::new(|new_len: u32| {
+        eprintln!("CURRENT IS {}", new_len);
+    });
 
     let work1 = Arc::clone(&work);
+    let st1 = Arc::clone(&st);
     thread::spawn(move || {
-        let mut st = PyState::new();
         let gil = Python::acquire_gil();
         let py = gil.python();
         let ast = PyModule::import(py, "ast").unwrap();
@@ -289,11 +295,12 @@ fn build_ui(app: &Application) {
                 if work1.die.load(Ordering::Relaxed) { break }
                 work1.do_work.store(work1.content.lock().unwrap().is_some(), Ordering::Relaxed);
             }
-            thread::sleep(Duration::from_millis(500));
+            thread::sleep(Duration::from_millis(400));
             if work1.do_work.load(Ordering::Relaxed) {
                 let lock = work1.content.lock();
+                let mut raw_st  = st1.lock().unwrap();
                 let (code, offset) = lock.unwrap().take().unwrap();
-                match py_parse(ptrs, &mut st, ast, code.as_str(), offset) {
+                match py_parse(ptrs, &mut raw_st, ast, code.as_str(), offset) {
                     Ok(val) => {
                         for v in val {
                             for vv in v{
@@ -301,10 +308,12 @@ fn build_ui(app: &Application) {
                     Err(e) => e.print(py) }}}});
 
     let tv2 = tv.clone();
-    def_changed_rx.attach(None, move |nm| {
-        add_history_header(&tv2, nm);
+    let g = move |nm| {
+        add_history_header(&tv2, nm, f.clone());
         glib::Continue(true)
-    });
+    };
+
+    def_changed_rx.attach(None, g);
 
     let work2 = Arc::clone(&work);
     tb.connect_highlight_updated(move |tba, start, end| {
@@ -329,7 +338,7 @@ fn build_ui(app: &Application) {
 }
 
 fn main() {
-    let application = Application::new(
+    let application = gtk::Application::new(
         Some("com.sting.python"),
         Default::default(),
     ).expect("failed to initialize GTK application");
@@ -337,10 +346,10 @@ fn main() {
     application.connect_startup(|_| {
         let provider = gtk::CssProvider::new();
         provider.load_from_data(STYLE.as_bytes()).expect("Failed to load CSS");
-        StyleContext::add_provider_for_screen(
+        gtk::StyleContext::add_provider_for_screen(
             &gdk::Screen::get_default().expect("Error initializing gtk css provider."),
             &provider,
-            STYLE_PROVIDER_PRIORITY_APPLICATION,
+            gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
         );
     });
 
