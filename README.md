@@ -69,7 +69,7 @@ module top_module.inner_module
 
 will declare all definitions that follow as part of `top_module.inner_module`. The *namespace* stores all names in fully qualified form. 
 
- **Showing different definitions with the same name**: It is possible for a single name to apply to multiple hashes. This can happen when update propagation is interrupted by a failing test case, or after a merge. In this case, the interface will add a different numeric suffix to each instance of the name. These names are not tracked in the *namespace*; they are added on the fly whenever this problem is encountered. 
+ **Showing different definitions with the same name**: It is possible for a single name to apply to multiple hashes. This can happen when you're viewing an old definition that references a definition that has since been updated. It can also happen when update propagation is interrupted by a failing test case, or after a merge. In this case, the interface will add a different numeric suffix to each instance of the name. These names are not tracked in the *namespace*; they are added on the fly whenever this problem is encountered. 
 
 **Removing a Definition from the Buffer**: If you want to remove a definition from the buffer without removing it from *view*, this will be done with a hot key or toolbar button. 
 
