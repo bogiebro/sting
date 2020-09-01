@@ -27,7 +27,12 @@ use std::sync::atomic::{Ordering, AtomicBool};
 use std::collections::{HashMap, HashSet, VecDeque};
 
 // TODO: inhibit changed signal on inserting formatted code
+
 // TODO: use gtk-test
+
+// TODO: instead of using a custom syntax highlighter to delimit defs,
+// let's just reuse the table of Marks we have.
+// We have a bunch of commands for moving iters to marks, so this should be easy
 
 const STYLE: &str = "
 button {
@@ -176,7 +181,7 @@ struct PyState {
     // This is data necessary for the display buffer
 
     // Where in the buffer is the given name defined?
-    lineno: HashMap<Hash, i32>
+    marks: HashMap<Hash, sourceview::Mark>
 
 }
 
@@ -239,18 +244,21 @@ fn update_name(st: &mut PyState, name: String, args: Option<Vec<String>>, val: H
 }
 
 // Add a new definition to the state, view and lineno
-fn add_def(st: &mut PyState, added: &mut Vec<Hash>, name: String, args: Option<Vec<String>>, hash: Hash, line: i32) {
-    if st.lineno.get(&hash).is_none() {
+fn add_def(
+    st: &mut PyState, added: &mut Vec<Hash>, name: String, args: Option<Vec<String>>,
+    hash: Hash, line: i32, tb: sourceview::Buffer) {
+    if st.marks.get(&hash).is_none() {
         eprintln!("NO HASH {:?}", hash);
         added.push(hash);
+        let mark = tb.create_source_mark(None, "def", &tb.get_iter_at_line(line)).unwrap();
+        st.marks.insert(hash, mark);
     }
     st.view.insert(hash);
-    st.lineno.insert(hash, line);
     update_name(st, name, args, hash);
 }
 
 // Store all definitions from a python ast into the state
-fn hash_def(ptrs: PyPtrs, st: &mut PyState, def: &PyAny, offset: i32) -> PyResult<Vec<Hash>> {
+fn hash_def(ptrs: PyPtrs, st: &mut PyState, def: &PyAny, offset: i32, tb: sourceview::Buffer) -> PyResult<Vec<Hash>> {
     let args = def.getattr("args")?.getattr("args")?.iter()?.map(|x| {
         Ok(x?.getattr("arg")?.extract()?)
     }).collect::<PyResult<Vec<String>>>()?;
@@ -262,13 +270,13 @@ fn hash_def(ptrs: PyPtrs, st: &mut PyState, def: &PyAny, offset: i32) -> PyResul
             let name = b.getattr("targets")?.get_item(0)?.getattr("id")?.extract()?;
             let val = hash_val(ptrs, st, b.getattr("value")?, &args)?;
             let line : i32 = b.getattr("lineno")?.extract()?;
-            add_def(st, &mut added, name, None, val, line + offset - 1);
+            add_def(st, &mut added, name, None, val, line + offset - 1, tb);
         } else if ty == ptrs.ret_ty {
             let name = def.getattr("name")?.extract()?;
             let val = hash_val(ptrs, st, b.getattr("value")?, &args)?;
             let lam_val = hash_expr(st, PyExpr::Lam(args.len(), val));
             let line : i32 = def.getattr("lineno")?.extract()?;
-            add_def(st, &mut added, name, Some(args), lam_val, line + offset - 1);
+            add_def(st, &mut added, name, Some(args), lam_val, line + offset - 1, tb);
             return Ok(added);
         }
     }
@@ -276,11 +284,12 @@ fn hash_def(ptrs: PyPtrs, st: &mut PyState, def: &PyAny, offset: i32) -> PyResul
 }
 
 // Parse new definitions and add them to the state
-fn py_parse<'a>(ptrs: PyPtrs, st: &mut PyState, ast: &'a PyModule, code: &str, offset: i32) ->
-        PyResult<impl Iterator<Item=Hash>> {
+fn py_parse<'a>(
+    ptrs: PyPtrs, st: &mut PyState, ast: &'a PyModule,
+    code: &str, offset: i32, tb: sourceview::Buffer) -> PyResult<impl Iterator<Item=Hash>> {
     let vecs : PyResult<Vec<Vec<Hash>>> = ast.call1("parse",
         (code,))?.getattr("body")?.iter()?.map(|x_r| {
-        hash_def(ptrs, st, x_r?, offset)
+        hash_def(ptrs, st, x_r?, offset, tb.clone())
     }).collect();
     Ok(vecs?.into_iter().flatten())
 }
@@ -386,7 +395,7 @@ fn get_text<'a>(h: &Hash, oargs: &Option<Vec<String>>, queue: &mut VecDeque<Hash
 }
 
 // Start the controller. Listen for messages that want to read or write state info and respond with DefText
-fn handle_msgs(pycall_rx: mpsc::Receiver<Msg>, def_changed_tx: glib::Sender<DefText>) {
+fn handle_msgs(pycall_rx: mpsc::Receiver<Msg>, def_changed_tx: glib::Sender<DefText>, tb: sourceview::Buffer) {
     let gil = Python::acquire_gil();
     let py = gil.python();
     let ast = PyModule::import(py, "ast").unwrap();
@@ -431,7 +440,7 @@ fn handle_msgs(pycall_rx: mpsc::Receiver<Msg>, def_changed_tx: glib::Sender<DefT
                 send_def_changeds(&st, queue);
             }
             Msg::ParseDef(s, ix) => {
-                match py_parse(ptrs, &mut st, ast, s.as_str(), ix) {
+                match py_parse(ptrs, &mut st, ast, s.as_str(), ix, tb) {
                     Ok(val) => send_def_changeds(&st, val.collect::<VecDeque<Hash>>()),
                     Err(e) => e.print(py)
                 }
@@ -493,6 +502,12 @@ fn update_work(work: Arc<Work>) -> impl Fn(&sourceview::Buffer, &gtk::TextIter, 
     }
 }
 
+// We have to send a message to the view to create Marks at the given places.
+// But by this time there could be more text, invalidating where we are inserting our marks
+// The sensible thing to do, in that case, is to check if the user has modified the
+// file since we saw it last. We can use 'work' for this. if they have, we're expecting
+// new mark events later anyway, so we can ignore the old ones.
+
 fn build_ui(app: &gtk::Application) {
     let window = gtk::ApplicationWindow::new(app);
     window.set_title("Sting");
@@ -510,7 +525,8 @@ fn build_ui(app: &gtk::Application) {
     let (pycall_tx, pycall_rx) = mpsc::sync_channel(5);
 
     // The controller may send DefTexts to the def_changed queue.
-    thread::spawn(move || handle_msgs(pycall_rx, def_changed_tx));
+    let tb2 = tb.clone();
+    thread::spawn(move || handle_msgs(pycall_rx, def_changed_tx, tb2));
 
     // When definitions change, we must update the buffer to reflect that
     def_changed_rx.attach(None, update_buffer(pycall_tx.clone(), tv.clone()));
