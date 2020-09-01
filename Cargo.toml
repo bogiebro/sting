@@ -12,6 +12,7 @@ glib = ""
 pyo3 = "0.11.1"
 sha2 = ""
 bincode = ""
+gtk-test = ""
 
 [dependencies.serde]
 version = "1.0"

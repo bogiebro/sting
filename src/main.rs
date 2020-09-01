@@ -18,12 +18,16 @@ use pyo3::ffi;
 use sha2::{Sha256, Digest};
 use serde::{Serialize};
 use std::rc::Rc;
+use std::default::Default;
 use std::thread;
 use std::time::Duration;
 use std::sync::{Mutex, Arc};
 use std::sync::mpsc;
 use std::sync::atomic::{Ordering, AtomicBool};
 use std::collections::{HashMap, HashSet, VecDeque};
+
+// TODO: inhibit changed signal on inserting formatted code
+// TODO: use gtk-test
 
 const STYLE: &str = "
 button {
@@ -140,6 +144,7 @@ struct NameInfo {
     line: i32
 }
 
+#[derive(Default)]
 struct PyState {
 
     // These define the history of the project
@@ -174,22 +179,6 @@ struct PyState {
     lineno: HashMap<Hash, i32>
 
 }
-
-impl PyState {
-    fn new() -> PyState {
-        PyState {
-            defs: HashMap::new(),
-            namespace: HashMap::new(),
-            chain: HashMap::new(),
-            view: HashSet::new(),
-            names: HashMap::new(),
-            branch_child: HashMap::new(),
-            len: HashMap::new(),
-            lineno: HashMap::new()
-        }
-    }
-}
-
 
 // Hash a PyExpr and add it to the state
 fn hash_expr(st: &mut PyState, expr: PyExpr) -> Hash {
@@ -252,6 +241,7 @@ fn update_name(st: &mut PyState, name: String, args: Option<Vec<String>>, val: H
 // Add a new definition to the state, view and lineno
 fn add_def(st: &mut PyState, added: &mut Vec<Hash>, name: String, args: Option<Vec<String>>, hash: Hash, line: i32) {
     if st.lineno.get(&hash).is_none() {
+        eprintln!("NO HASH {:?}", hash);
         added.push(hash);
     }
     st.view.insert(hash);
@@ -319,20 +309,11 @@ impl PyPtrs {
     }
 }
 
+#[derive(Default)]
 struct Work {
     do_work: AtomicBool,
     die: AtomicBool,
     content: Mutex<Option<Msg>>
-}
-
-impl Work {
-    fn new() -> Work {
-        Work{
-            do_work: AtomicBool::new(false),
-            die: AtomicBool::new(false),
-            content: Mutex::new(None)
-        }
-    }
 }
 
 // To interact with the controller, other threads must send it messages
@@ -358,7 +339,7 @@ fn spawn_parse_after_delay(work: Arc<Work>, pycall_tx: mpsc::SyncSender<Msg>) {
                 if work.die.load(Ordering::Relaxed) { break }
                 work.do_work.store(work.content.lock().unwrap().is_some(), Ordering::Relaxed);
             }
-            thread::sleep(Duration::from_millis(400));
+            thread::sleep(Duration::from_millis(600));
             if work.do_work.load(Ordering::Relaxed) {
                 let msg = work.content.lock().unwrap().take().unwrap();
                 pycall_tx.send(msg).unwrap();
@@ -412,7 +393,7 @@ fn handle_msgs(pycall_rx: mpsc::Receiver<Msg>, def_changed_tx: glib::Sender<DefT
     let unparse = PyModule::import(py, "astunparse").unwrap();
     let ptrs = PyPtrs::new(ast);
     let helpers = PyModule::from_code(py, AST_HELPERS, "ast_helpers.py", "ast_helpers").unwrap();
-    let mut st = PyState::new();
+    let mut st: PyState = Default::default();
 
     let send_def_changeds = |st_imm: &PyState, mut queue: VecDeque<Hash>| {
         while let Some(vv) = queue.pop_front() {
@@ -459,6 +440,11 @@ fn handle_msgs(pycall_rx: mpsc::Receiver<Msg>, def_changed_tx: glib::Sender<DefT
     }
 }
 
+
+// When we insert a header, the line numbers get off.
+// Also: when we do pretty much anything, line numbers get off
+// It would be much nicer to map hashes to the child widgets directly
+
 // Create a closure to update DefText in the buffer. If this definition is shown for the first time,
 // register Msg sends to the controller on slider changes
 fn update_buffer(pycall_tx: mpsc::SyncSender<Msg>, tv: sourceview::View) -> impl FnMut(DefText) -> glib::Continue {
@@ -469,6 +455,10 @@ fn update_buffer(pycall_tx: mpsc::SyncSender<Msg>, tv: sourceview::View) -> impl
         let mut iter = iter0.clone();
         tb.iter_forward_to_context_class_toggle(&mut iter, "funcdef");
         tb.iter_forward_to_context_class_toggle(&mut iter, "funcdef");
+        match tb.get_text(&iter0, &iter, true) {
+            Some(gstr) => eprintln!("TEXT IS {:?}", gstr.as_str()),
+            _ => ()
+        }
         tb.delete(&mut iter0, &mut iter);
         tb.insert(&mut iter0, &upd.text);
         let pycall_tx2 = pycall_tx.clone();
@@ -526,7 +516,7 @@ fn build_ui(app: &gtk::Application) {
     def_changed_rx.attach(None, update_buffer(pycall_tx.clone(), tv.clone()));
 
     // When new definitons are entered by the user, they are stuck in this mutex
-    let work = Arc::new(Work::new());
+    let work : Arc<Work> = Default::default();
 
     // After a pause, user entries become ParseDef Msgs and are sent to the controller
     spawn_parse_after_delay(work.clone(), pycall_tx);
