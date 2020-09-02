@@ -200,7 +200,8 @@ impl Widget for Header {
 pub struct Model {
     maps: Maps,
     tb: sourceview::Buffer,
-    tag: gtk::TextTag,
+    immut_tag: gtk::TextTag,
+    def_tag: gtk::TextTag,
     relm: Relm<Win>,
     last_update: Instant,
     ast_ptrs: ASTPtrs,
@@ -240,12 +241,15 @@ impl Widget for Win {
         let ptrs = ASTPtrs::new(&mods.ast, py);
         let tb = sourceview::Buffer::new_with_language(&python);
         let tt = tb.get_tag_table().unwrap();
-        let tag = gtk::TextTag::new(None);
-        tag.set_property_editable(false);
-        tt.add(&tag);
+        let immut_tag = gtk::TextTag::new(Some("immut"));
+        let def_tag = gtk::TextTag::new(Some("definition"));
+        immut_tag.set_property_editable(false);
+        tt.add(&immut_tag);
+        tt.add(&def_tag);
         Model{
             tb: tb,
-            tag: tag,
+            immut_tag: immut_tag,
+            def_tag: def_tag,
             maps: Default::default(),
             relm: relm.clone(),
             last_update: Instant::now(),
@@ -280,7 +284,7 @@ impl Widget for Win {
                         let anchor = self.model.tb.create_child_anchor(&mut mark_iter).unwrap();
                         self.model.tb.insert(&mut mark_iter, "\n");
                         let start_iter = self.model.tb.get_iter_at_mark(&mark);
-                        self.model.tb.apply_tag(&self.model.tag, &start_iter, &mark_iter);
+                        self.model.tb.apply_tag(&self.model.immut_tag, &start_iter, &mark_iter);
                         self.model.tb.move_mark(&mark, &mark_iter);
                         let comp = create_component((hash, len));
                         let widget: &gtk::Box = comp.widget();
@@ -405,6 +409,8 @@ impl Widget for Win {
                 ).unwrap_or_else(|| self.model.tb.get_end_iter());
                 self.model.tb.delete(&mut start_iter, &mut end_iter);
                 self.model.tb.insert(&mut start_iter, txt.trim_start());
+                let def_iter = self.model.tb.get_iter_at_mark(mark);
+                self.model.tb.apply_tag(&self.model.def_tag, &def_iter, &start_iter);
             },
             None => eprintln!("could not find mark")
         }
