@@ -7,7 +7,7 @@ use sourceview::{LanguageManagerExt, ViewExt, BufferExt, MarkExt};
 use std::default::Default;
 use std::collections::{HashMap, HashSet};
 use std::time::{Instant, Duration};
-use relm::{connect, Relm, Widget, timeout};
+use relm::{connect, Relm, Widget, Component, timeout, create_component};
 use pyo3::prelude::*;
 use pyo3::exceptions;
 use pyo3::ffi;
@@ -19,8 +19,6 @@ use serde::{Serialize};
 // Whenever the cursor changes position, look up what tag its in or in between
 // Add this region to the update list
 // When we finally update, send only regions in the update list (and clear the update list)
-
-// For now, we can test it as is. We won't have sliders, but things should still work.
 
 type Hash = [u8; 32];
 
@@ -52,15 +50,12 @@ pub struct Maps {
     // How to interpret names in new definitions
     names: HashMap<String, Hash>,
 
-    // Maps from parent to child. Eventually, we'll have one map per branch
-    branch_child: HashMap<Hash, Hash>,
-
     // How long is the chain of hashes ending at this hash?
     // Not all hashes have entries- this is just a cache for branch tips
-    len: HashMap<Hash, u32>,
+    len: HashMap<Hash, usize>,
 
     // Where in the buffer is the given name defined?
-    marks: HashMap<Hash, sourceview::Mark>,
+    marks: HashMap<Hash, (sourceview::Mark, Option<Component<Header>>)>,
 }
 
 // To check which type of AST nodes we parsed, we keep an example of each node type
@@ -189,6 +184,7 @@ impl Widget for Header {
 pub struct Model {
     maps: Maps,
     tb: sourceview::Buffer,
+    tag: gtk::TextTag,
     relm: Relm<Win>,
     last_update: Instant,
     ast_ptrs: ASTPtrs,
@@ -217,6 +213,9 @@ scale {
 }
 ";
 
+// Idea: try just adding the widget to an vbox. Ensure that that works. Then go back to
+// child anchor adding
+
 #[widget]
 impl Widget for Win {
     fn model(relm: &Relm<Self>, _: ()) -> Model {
@@ -226,8 +225,14 @@ impl Widget for Win {
         let py = gil.python();
         let mods = PyMods::new(py);
         let ptrs = ASTPtrs::new(&mods.ast, py);
+        let tb = sourceview::Buffer::new_with_language(&python);
+        let tt = tb.get_tag_table().unwrap();
+        let tag = gtk::TextTag::new(None);
+        tag.set_property_editable(false);
+        tt.add(&tag);
         Model{
-            tb: sourceview::Buffer::new_with_language(&python),
+            tb: tb,
+            tag: tag,
             maps: Default::default(),
             relm: relm.clone(),
             last_update: Instant::now(),
@@ -243,8 +248,6 @@ impl Widget for Win {
         self.get_def(&hash);
     }
 
-    // TODO: also add the header widgets if we have a prev
-    // connect the header widgets to
     fn add_def(&mut self, name: String, args: Option<Vec<String>>, hash: Hash, line: i32) {
         let prev = self.model.maps.names.get(&name).map(|x| *x);
         match prev {
@@ -253,8 +256,21 @@ impl Widget for Win {
                     let len = self.model.maps.len.get(&h).unwrap_or(&1) + 1;
                     self.model.maps.len.insert(hash, len);
                     self.model.maps.chain.insert(hash, h);
-                    let mark = self.model.maps.marks.remove(&h).unwrap();
-                    self.model.maps.marks.insert(hash, mark);
+                    let (mark, mcomp) = self.model.maps.marks.remove(&h).unwrap();
+                    let mcomp2 = mcomp.or_else(|| {
+                        let mut mark_iter = self.model.tb.get_iter_at_mark(&mark);
+                        let anchor = self.model.tb.create_child_anchor(&mut mark_iter).unwrap();
+                        self.model.tb.insert(&mut mark_iter, "\n");
+                        let start_iter = self.model.tb.get_iter_at_mark(&mark);
+                        self.model.tb.apply_tag(&self.model.tag, &start_iter, &mark_iter);
+                        let comp = create_component((h, len));
+                        let widget: &gtk::Box = comp.widget();
+                        self.view.add_child_at_anchor(widget, &anchor);
+                        widget.show_all();
+                        eprintln!("Got here");
+                        Some(comp)
+                    });
+                    self.model.maps.marks.insert(hash, (mark, mcomp2));
                     self.add_new_def(hash, name, args);
                 }
             },
@@ -263,7 +279,7 @@ impl Widget for Win {
                     None,
                     "def",
                     &self.model.tb.get_iter_at_line(line)).unwrap();
-                self.model.maps.marks.insert(hash, mark);
+                self.model.maps.marks.insert(hash, (mark, None));
                 self.add_new_def(hash, name, args);
             }
         }
@@ -357,7 +373,7 @@ impl Widget for Win {
             None => self.model.mods.helpers.call_method1(py, "assign", (s, val)).unwrap()
         };
         let txt: String = self.model.mods.unparse.call_method1(py, "unparse", (obj,)).unwrap().extract(py).unwrap();
-        let mark = self.model.maps.marks.get(h).unwrap();
+        let mark = &self.model.maps.marks.get(h).unwrap().0;
         let mut start_iter = self.model.tb.get_iter_at_mark(mark);
         let mut end_iter = mark.next(Some("def")).map(|m| self.model.tb.get_iter_at_mark(&m)).unwrap_or_else(||
             self.model.tb.get_end_iter());
@@ -407,7 +423,7 @@ impl Widget for Win {
                 let mut h_iter = h;
                 let mut counter = offset;
                 if counter > 0 {
-                    while let Some(h_child) = self.model.maps.branch_child.get(&h_iter) {
+                    while let Some(h_child) = self.model.maps.chain.get(&h_iter) {
                         h_iter = *h_child;
                         counter -= 1;
                         if counter == 0 { break }
@@ -431,6 +447,7 @@ impl Widget for Win {
 
     view! {
         gtk::Window {
+            #[name="view"]
             sourceview::View {
                 buffer: Some(&self.model.tb),
                 auto_indent: true,
