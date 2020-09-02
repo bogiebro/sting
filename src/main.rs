@@ -242,7 +242,7 @@ impl Widget for Win {
         self.model.maps.view.insert(hash);
         self.model.maps.names.insert(name.clone(), hash);
         self.model.maps.namespace.insert(hash, (name, args));
-        self.get_def(&hash);
+        self.get_def(&hash, &hash);
     }
 
     fn add_def(&mut self, name: String, args: Option<Vec<String>>, hash: Hash, line: i32) {
@@ -264,6 +264,7 @@ impl Widget for Win {
                         let comp = create_component((h, len));
                         let widget: &gtk::Box = comp.widget();
                         self.view.add_child_at_anchor(widget, &anchor);
+                        connect!(comp@HeaderMsg::SliderSet(hm,sm), self.model.relm, WinMsg::GetDef(hm,sm));
                         widget.show_all();
                         Some(comp)
                     });
@@ -356,7 +357,7 @@ impl Widget for Win {
     }
 
     // Get the ast of a definition
-    fn get_def(&self, h: &Hash) {
+    fn get_def(&self, h: &Hash, tip: &Hash) {
         eprintln!("REPLACING DEF");
         let gil = Python::acquire_gil();
         let py = gil.python();
@@ -370,7 +371,7 @@ impl Widget for Win {
             None => self.model.mods.helpers.call_method1(py, "assign", (s, val)).unwrap()
         };
         let txt: String = self.model.mods.unparse.call_method1(py, "unparse", (obj,)).unwrap().extract(py).unwrap();
-        let mark = &self.model.maps.marks.get(h).unwrap().0;
+        let mark = &self.model.maps.marks.get(tip).unwrap().0;
         let mut start_iter = self.model.tb.get_iter_at_mark(mark);
         let mut end_iter = mark.next(Some("def")).map(|m| self.model.tb.get_iter_at_mark(&m)).unwrap_or_else(||
             self.model.tb.get_end_iter());
@@ -417,16 +418,17 @@ impl Widget for Win {
                 timeout(self.model.relm.stream(), 600, || WinMsg::ParseBuffer)
             },
             WinMsg::GetDef(h, offset) => {
+                eprintln!("Getting a def");
                 let mut h_iter = h;
                 let mut counter = offset;
                 if counter > 0 {
-                    while let Some(h_child) = self.model.maps.chain.get(&h_iter) {
-                        h_iter = *h_child;
+                    while let Some(h_parent) = self.model.maps.chain.get(&h_iter) {
+                        h_iter = *h_parent;
                         counter -= 1;
                         if counter == 0 { break }
                     }
                 }
-                self.get_def(&h_iter);
+                self.get_def(&h_iter, &h);
             },
             WinMsg::Quit => gtk::main_quit()
         }
