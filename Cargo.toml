@@ -11,8 +11,9 @@ gdk = "^0"
 glib = ""
 pyo3 = "0.11.1"
 sha2 = ""
+relm = "^0.20.0"
 bincode = ""
-gtk-test = ""
+relm-derive = "^0.20.0"
 
 [dependencies.serde]
 version = "1.0"
