@@ -20,6 +20,8 @@ use serde::{Serialize};
 // Add this region to the update list
 // When we finally update, send only regions in the update list (and clear the update list)
 
+// TODO: prevent double-parsing. This can interact with the system above
+
 type Hash = [u8; 32];
 
 #[derive(Serialize, Debug)]
@@ -121,6 +123,7 @@ impl PyMods {
 
 pub struct HeaderModel {
     adj: gtk::Adjustment,
+    prev_val: usize,
     relm: Relm<Header>,
     hash: Hash
 }
@@ -128,7 +131,8 @@ pub struct HeaderModel {
 #[derive(Msg)]
 pub enum HeaderMsg {
     SliderChange,
-    SliderSet(Hash, usize)
+    SliderSet(Hash, usize),
+    NewHash(Hash, usize),
 }
 
 #[widget]
@@ -136,10 +140,12 @@ impl Widget for Header {
     fn model(relm: &Relm<Self>, args: (Hash, usize)) -> HeaderModel {
         let (hash, len) = args;
         let lenf = len as f64;
+        let adj = gtk::Adjustment::new(lenf, 1., lenf, 0., 0., 0.);
         HeaderModel {
             relm: relm.clone(),
-            adj: gtk::Adjustment::new(lenf, 0., lenf, 1., 1., 1.),
-            hash: hash
+            adj: adj,
+            hash: hash,
+            prev_val: len,
         }
     }
 
@@ -150,9 +156,18 @@ impl Widget for Header {
                 let new_val = old_val.round();
                 if old_val != new_val {
                     self.model.adj.set_value(new_val);
-                    let offset = (self.model.adj.get_upper() - new_val) as usize;
-                    self.model.relm.stream().emit(HeaderMsg::SliderSet(self.model.hash, offset));
+                    let uval = new_val as usize;
+                    if uval != self.model.prev_val {
+                        self.model.prev_val = uval;
+                        let offset = (self.model.adj.get_upper() - new_val) as usize;
+                        self.model.relm.stream().emit(HeaderMsg::SliderSet(self.model.hash, offset));
+                    }
+
                 }
+            },
+            HeaderMsg::NewHash(h,s) => {
+                self.model.hash = h;
+                self.model.adj.set_upper(s as f64);
             },
             _ => ()
         }
@@ -160,7 +175,8 @@ impl Widget for Header {
 
     fn init_view(&mut self) {
         self.hbox.set_size_request(500, -1);
-        connect!(self.model.relm, self.model.adj, connect_value_changed(_), HeaderMsg::SliderChange)
+        self.model.adj.set_value(self.model.prev_val as f64);
+        connect!(self.model.relm, self.model.adj, connect_value_changed(_), HeaderMsg::SliderChange);
     }
 
     view! {
@@ -246,6 +262,10 @@ impl Widget for Win {
     }
 
     fn add_def(&mut self, name: String, args: Option<Vec<String>>, hash: Hash, line: i32) {
+        if self.model.maps.view.contains(&hash) {
+            eprintln!("ALREADY ADDED {:?} TO BUFFER", hash);
+            return
+        }
         let prev = self.model.maps.names.get(&name).map(|x| *x);
         match prev {
             Some(h) => {
@@ -253,21 +273,26 @@ impl Widget for Win {
                     let len = self.model.maps.len.get(&h).unwrap_or(&1) + 1;
                     self.model.maps.len.insert(hash, len);
                     self.model.maps.chain.insert(hash, h);
+                    eprintln!("Removing {:?} from marks", h);
                     let (mark, mcomp) = self.model.maps.marks.remove(&h).unwrap();
-                    let mcomp2 = mcomp.or_else(|| {
+                    let mcomp2 = mcomp.map_or_else(|| {
                         let mut mark_iter = self.model.tb.get_iter_at_mark(&mark);
                         let anchor = self.model.tb.create_child_anchor(&mut mark_iter).unwrap();
                         self.model.tb.insert(&mut mark_iter, "\n");
                         let start_iter = self.model.tb.get_iter_at_mark(&mark);
                         self.model.tb.apply_tag(&self.model.tag, &start_iter, &mark_iter);
                         self.model.tb.move_mark(&mark, &mark_iter);
-                        let comp = create_component((h, len));
+                        let comp = create_component((hash, len));
                         let widget: &gtk::Box = comp.widget();
                         self.view.add_child_at_anchor(widget, &anchor);
                         connect!(comp@HeaderMsg::SliderSet(hm,sm), self.model.relm, WinMsg::GetDef(hm,sm));
                         widget.show_all();
                         Some(comp)
+                    }, |comp| {
+                        comp.emit(HeaderMsg::NewHash(hash, len));
+                        Some(comp)
                     });
+                    eprintln!("Adding {:?} to marks", hash);
                     self.model.maps.marks.insert(hash, (mark, mcomp2));
                     self.add_new_def(hash, name, args);
                 }
@@ -371,12 +396,18 @@ impl Widget for Win {
             None => self.model.mods.helpers.call_method1(py, "assign", (s, val)).unwrap()
         };
         let txt: String = self.model.mods.unparse.call_method1(py, "unparse", (obj,)).unwrap().extract(py).unwrap();
-        let mark = &self.model.maps.marks.get(tip).unwrap().0;
-        let mut start_iter = self.model.tb.get_iter_at_mark(mark);
-        let mut end_iter = mark.next(Some("def")).map(|m| self.model.tb.get_iter_at_mark(&m)).unwrap_or_else(||
-            self.model.tb.get_end_iter());
-        self.model.tb.delete(&mut start_iter, &mut end_iter);
-        self.model.tb.insert(&mut start_iter, txt.trim_start());
+        eprintln!("Looking up {:?} in marks", tip);
+        match self.model.maps.marks.get(tip) {
+            Some((mark, _)) => {
+                let mut start_iter = self.model.tb.get_iter_at_mark(mark);
+                let mut end_iter = mark.next(Some("def")).map(|m|
+                    self.model.tb.get_iter_at_mark(&m)
+                ).unwrap_or_else(|| self.model.tb.get_end_iter());
+                self.model.tb.delete(&mut start_iter, &mut end_iter);
+                self.model.tb.insert(&mut start_iter, txt.trim_start());
+            },
+            None => eprintln!("could not find mark")
+        }
     }
 
     fn get_text_ref(&self, py: Python, h: &Hash, oargs: &Option<Vec<String>>) -> PyObject {
@@ -418,7 +449,7 @@ impl Widget for Win {
                 timeout(self.model.relm.stream(), 600, || WinMsg::ParseBuffer)
             },
             WinMsg::GetDef(h, offset) => {
-                eprintln!("Getting a def");
+                eprintln!("Getting a def at {}:\n {:?}", offset, h);
                 let mut h_iter = h;
                 let mut counter = offset;
                 if counter > 0 {
