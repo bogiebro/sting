@@ -7,6 +7,7 @@ use sourceview::{LanguageManagerExt, ViewExt, BufferExt, MarkExt};
 use std::default::Default;
 use std::collections::{HashMap, HashSet};
 use std::time::{Instant, Duration};
+use std::mem;
 use relm::{connect, Relm, Widget, Component, timeout, create_component};
 use pyo3::prelude::*;
 use pyo3::exceptions;
@@ -15,12 +16,12 @@ use pyo3::conversion::AsPyPointer;
 use sha2::{Sha256, Digest};
 use serde::{Serialize};
 
-// TODO: make tags for every definition
-// Whenever the cursor changes position, look up what tag its in or in between
-// Add this region to the update list
-// When we finally update, send only regions in the update list (and clear the update list)
+// TODO: prevent double-parsing on retrieval. There doesn't seem to be a good way of doing this.
+// We can do a hack: record whatever hash we're about to modify. Modifications occur one by one.
+// When we respond to a BufferUpdate, check if it's the one we just modified.
+// If it is, don't add it to the set, and clear the warning hash
 
-// TODO: prevent double-parsing. This can interact with the system above
+// TODO: with multiple definitions, the tags don't seem to work
 
 type Hash = [u8; 32];
 
@@ -202,6 +203,7 @@ pub struct Model {
     tb: sourceview::Buffer,
     immut_tag: gtk::TextTag,
     def_tag: gtk::TextTag,
+    changed_marks: Vec<sourceview::Mark>,
     relm: Relm<Win>,
     last_update: Instant,
     ast_ptrs: ASTPtrs,
@@ -250,6 +252,7 @@ impl Widget for Win {
             tb: tb,
             immut_tag: immut_tag,
             def_tag: def_tag,
+            changed_marks: Vec::new(),
             maps: Default::default(),
             relm: relm.clone(),
             last_update: Instant::now(),
@@ -265,6 +268,9 @@ impl Widget for Win {
         self.get_def(&hash, &hash);
     }
 
+    // TODO: this isn't really what the view is supposed to be for.
+    // We should actually remove hashes from the view when we scrub back
+    // We can keep another hashset, called 'in_buffer' or something, for this stuff.
     fn add_def(&mut self, name: String, args: Option<Vec<String>>, hash: Hash, line: i32) {
         if self.model.maps.view.contains(&hash) {
             eprintln!("ALREADY ADDED {:?} TO BUFFER", hash);
@@ -302,9 +308,7 @@ impl Widget for Win {
                 }
             },
             None => {
-                let mark = self.model.tb.create_source_mark(
-                    None,
-                    "def",
+                let mark = self.model.tb.create_source_mark(None, "def",
                     &self.model.tb.get_iter_at_line(line)).unwrap();
                 self.model.maps.marks.insert(hash, (mark, None));
                 self.add_new_def(hash, name, args);
@@ -407,10 +411,12 @@ impl Widget for Win {
                 let mut end_iter = mark.next(Some("def")).map(|m|
                     self.model.tb.get_iter_at_mark(&m)
                 ).unwrap_or_else(|| self.model.tb.get_end_iter());
+                self.model.tb.begin_user_action();
                 self.model.tb.delete(&mut start_iter, &mut end_iter);
                 self.model.tb.insert(&mut start_iter, txt.trim_start());
                 let def_iter = self.model.tb.get_iter_at_mark(mark);
                 self.model.tb.apply_tag(&self.model.def_tag, &def_iter, &start_iter);
+                self.model.tb.end_user_action();
             },
             None => eprintln!("could not find mark")
         }
@@ -442,17 +448,21 @@ impl Widget for Win {
         match event {
             WinMsg::ParseBuffer => {
                 if Instant::now().duration_since(self.model.last_update) >= Duration::from_millis(600) {
-                    let tb = &self.model.tb;
                     let gil = Python::acquire_gil();
                     let py = gil.python();
-                    for gstr in tb.get_text(&tb.get_start_iter(), &tb.get_end_iter(), false).into_iter() {
-                        self.parse_str(py, gstr, 0).unwrap_or_else(|e| e.print(py))
+                    let mut prev_changed_marks = Vec::new();
+                    mem::swap(&mut self.model.changed_marks, &mut prev_changed_marks);
+                    for mark in prev_changed_marks.iter() {
+                        let region_start = self.model.tb.get_iter_at_mark(mark);
+                        let mut region_end = region_start.clone();
+                        self.model.tb.delete_mark(mark);
+                        region_end.forward_to_tag_toggle(Some(&self.model.def_tag));
+                        for gstr in region_start.get_text(&region_end).into_iter() {
+                            eprintln!("STRING:\n{}", gstr.as_str());
+                            self.parse_str(py, gstr, 0).unwrap_or_else(|e| e.print(py))
+                        }
                     }
                 }
-            },
-            WinMsg::BufferUpdate => {
-                self.model.last_update = Instant::now();
-                timeout(self.model.relm.stream(), 600, || WinMsg::ParseBuffer)
             },
             WinMsg::GetDef(h, offset) => {
                 eprintln!("Getting a def at {}:\n {:?}", offset, h);
@@ -466,6 +476,19 @@ impl Widget for Win {
                     }
                 }
                 self.get_def(&h_iter, &h);
+            },
+            WinMsg::BufferUpdate => {
+                let ins_mark = self.model.tb.get_insert().unwrap();
+                let mut region_start = self.model.tb.get_iter_at_mark(&ins_mark);
+                region_start.backward_to_tag_toggle(Some(&self.model.def_tag));
+                let len = self.model.tb.get_source_marks_at_iter(&mut region_start, Some("update")).len();
+                if len == 0 {
+                    eprintln!("GOT {:?}", region_start);
+                    let region_mark = self.model.tb.create_source_mark(None, "update", &region_start).unwrap();
+                    self.model.changed_marks.push(region_mark);
+                }
+                self.model.last_update = Instant::now();
+                timeout(self.model.relm.stream(), 600, || WinMsg::ParseBuffer)
             },
             WinMsg::Quit => gtk::main_quit()
         }
@@ -489,7 +512,7 @@ impl Widget for Win {
                 auto_indent: true,
                 indent_on_tab: true,
                 smart_backspace: true,
-                indent_width: 4
+                indent_width: 4,
             },
             delete_event(_, _) => (WinMsg::Quit, gtk::Inhibit(false))
         },
