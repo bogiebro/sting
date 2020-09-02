@@ -213,9 +213,6 @@ scale {
 }
 ";
 
-// Idea: try just adding the widget to an vbox. Ensure that that works. Then go back to
-// child anchor adding
-
 #[widget]
 impl Widget for Win {
     fn model(relm: &Relm<Self>, _: ()) -> Model {
@@ -263,11 +260,11 @@ impl Widget for Win {
                         self.model.tb.insert(&mut mark_iter, "\n");
                         let start_iter = self.model.tb.get_iter_at_mark(&mark);
                         self.model.tb.apply_tag(&self.model.tag, &start_iter, &mark_iter);
+                        self.model.tb.move_mark(&mark, &mark_iter);
                         let comp = create_component((h, len));
                         let widget: &gtk::Box = comp.widget();
                         self.view.add_child_at_anchor(widget, &anchor);
                         widget.show_all();
-                        eprintln!("Got here");
                         Some(comp)
                     });
                     self.model.maps.marks.insert(hash, (mark, mcomp2));
