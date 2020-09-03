@@ -22,6 +22,8 @@ use serde::{Serialize};
 // If it is, don't add it to the set, and clear the warning hash
 
 // TODO: with multiple definitions, the tags don't seem to work
+// Currently, we delete up to the next tag.
+// Maybe the better thing to do is to delete the range
 
 type Hash = [u8; 32];
 
@@ -168,7 +170,9 @@ impl Widget for Header {
             },
             HeaderMsg::NewHash(h,s) => {
                 self.model.hash = h;
+                self.model.prev_val = s;
                 self.model.adj.set_upper(s as f64);
+                self.model.adj.set_value(s as f64);
             },
             _ => ()
         }
@@ -408,9 +412,9 @@ impl Widget for Win {
         match self.model.maps.marks.get(tip) {
             Some((mark, _)) => {
                 let mut start_iter = self.model.tb.get_iter_at_mark(mark);
-                let mut end_iter = mark.next(Some("def")).map(|m|
-                    self.model.tb.get_iter_at_mark(&m)
-                ).unwrap_or_else(|| self.model.tb.get_end_iter());
+                let mut end_iter = start_iter.clone();
+                end_iter.forward_to_tag_toggle(Some(&self.model.def_tag));
+                eprintln!("DELETING TEXT {}", start_iter.get_text(&end_iter).unwrap().as_str());
                 self.model.tb.begin_user_action();
                 self.model.tb.delete(&mut start_iter, &mut end_iter);
                 self.model.tb.insert(&mut start_iter, txt.trim_start());
