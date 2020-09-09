@@ -21,9 +21,6 @@ use serde::{Serialize};
 // When we respond to a BufferUpdate, check if it's the one we just modified.
 // If it is, don't add it to the set, and clear the warning hash
 
-// TODO: with multiple definitions, the tags don't seem to work
-// Currently, we delete up to the next tag.
-// Maybe the better thing to do is to delete the range
 
 type Hash = [u8; 32];
 
@@ -60,7 +57,13 @@ pub struct Maps {
     len: HashMap<Hash, usize>,
 
     // Where in the buffer is the given name defined?
-    marks: HashMap<Hash, (sourceview::Mark, Option<Component<Header>>)>,
+    marks: HashMap<Hash, sourceview::Mark>,
+
+    // What is the widget that controls the hash's history?
+    headers: HashMap<Hash, Component<Header>>,
+
+    // What definitions are you currently editing?
+    in_buffer: HashSet<Hash>
 }
 
 // To check which type of AST nodes we parsed, we keep an example of each node type
@@ -250,6 +253,7 @@ impl Widget for Win {
         let immut_tag = gtk::TextTag::new(Some("immut"));
         let def_tag = gtk::TextTag::new(Some("definition"));
         immut_tag.set_property_editable(false);
+        def_tag.set_property_background_rgba(Some(&gdk::RGBA::red()));
         tt.add(&immut_tag);
         tt.add(&def_tag);
         Model{
@@ -265,59 +269,55 @@ impl Widget for Win {
         }
     }
 
-    fn add_new_def(&mut self, hash: Hash, name: String, args: Option<Vec<String>>) {
-        self.model.maps.view.insert(hash);
-        self.model.maps.names.insert(name.clone(), hash);
-        self.model.maps.namespace.insert(hash, (name, args));
-        self.get_def(&hash, &hash);
-    }
-
-    // TODO: this isn't really what the view is supposed to be for.
-    // We should actually remove hashes from the view when we scrub back
-    // We can keep another hashset, called 'in_buffer' or something, for this stuff.
-    fn add_def(&mut self, name: String, args: Option<Vec<String>>, hash: Hash, line: i32) {
-        if self.model.maps.view.contains(&hash) {
+    fn add_def(&mut self, name: String, args: Option<Vec<String>>, hash: Hash, line: i32, line_end: i32) {
+        if self.model.maps.in_buffer.contains(&hash) {
             eprintln!("ALREADY ADDED {:?} TO BUFFER", hash);
             return
         }
-        let prev = self.model.maps.names.get(&name).map(|x| *x);
-        match prev {
-            Some(h) => {
-                if h != hash {
-                    let len = self.model.maps.len.get(&h).unwrap_or(&1) + 1;
-                    self.model.maps.len.insert(hash, len);
-                    self.model.maps.chain.insert(hash, h);
-                    eprintln!("Removing {:?} from marks", h);
-                    let (mark, mcomp) = self.model.maps.marks.remove(&h).unwrap();
-                    let mcomp2 = mcomp.map_or_else(|| {
-                        let mut mark_iter = self.model.tb.get_iter_at_mark(&mark);
-                        let anchor = self.model.tb.create_child_anchor(&mut mark_iter).unwrap();
-                        self.model.tb.insert(&mut mark_iter, "\n");
-                        let start_iter = self.model.tb.get_iter_at_mark(&mark);
-                        self.model.tb.apply_tag(&self.model.immut_tag, &start_iter, &mark_iter);
-                        self.model.tb.move_mark(&mark, &mark_iter);
-                        let comp = create_component((hash, len));
-                        let widget: &gtk::Box = comp.widget();
-                        self.view.add_child_at_anchor(widget, &anchor);
-                        connect!(comp@HeaderMsg::SliderSet(hm,sm), self.model.relm, WinMsg::GetDef(hm,sm));
-                        widget.show_all();
-                        Some(comp)
-                    }, |comp| {
-                        comp.emit(HeaderMsg::NewHash(hash, len));
-                        Some(comp)
-                    });
-                    eprintln!("Adding {:?} to marks", hash);
-                    self.model.maps.marks.insert(hash, (mark, mcomp2));
-                    self.add_new_def(hash, name, args);
-                }
-            },
-            None => {
-                let mark = self.model.tb.create_source_mark(None, "def",
-                    &self.model.tb.get_iter_at_line(line)).unwrap();
-                self.model.maps.marks.insert(hash, (mark, None));
-                self.add_new_def(hash, name, args);
+        let mut line_iter = self.model.tb.get_iter_at_line(line);
+        let mut end_iter = self.model.tb.get_iter_at_line(line_end);
+        if let Some(h) = self.model.maps.names.get(&name) {
+            let len = self.model.maps.len.get(h).unwrap_or(&1) + 1;
+            self.model.maps.len.insert(hash, len);
+            self.model.maps.chain.insert(hash, *h);
+            
+            let prev_mark = self.model.maps.marks.remove(h).unwrap();
+            let mark_copy = prev_mark.clone();
+            let prev_iter = self.model.tb.get_iter_at_mark(&prev_mark);
+            self.model.maps.marks.insert(hash, prev_mark);
+            if line_iter != prev_iter {
+                eprintln!("MOVING DEF TO PREVIOUS LOCATION");
+                self.model.tb.delete(&mut line_iter, &mut end_iter);
+            } else {
+                self.model.tb.apply_tag(&self.model.def_tag, &line_iter, &end_iter);
             }
+            match self.model.maps.headers.get(h) {
+                None => {
+                    let mut mark_iter = self.model.tb.get_iter_at_mark(&mark_copy);
+                    let anchor = self.model.tb.create_child_anchor(&mut mark_iter).unwrap();
+                    self.model.tb.insert(&mut mark_iter, "\n");
+                    let start_iter = self.model.tb.get_iter_at_mark(&mark_copy);
+                    self.model.tb.apply_tag(&self.model.immut_tag, &start_iter, &mark_iter);
+                    self.model.tb.move_mark(&mark_copy, &mark_iter);
+                    let comp = create_component((hash, len));
+                    let widget: &gtk::Box = comp.widget();
+                    self.view.add_child_at_anchor(widget, &anchor);
+                    connect!(comp@HeaderMsg::SliderSet(hm,sm), self.model.relm, WinMsg::GetDef(hm,sm));
+                    widget.show_all();
+                    self.model.maps.headers.insert(hash, comp);
+                },
+                Some(comp) => comp.emit(HeaderMsg::NewHash(hash, len))
+            }
+        } else {
+            let mark = self.model.tb.create_source_mark(None, "def", &line_iter).unwrap();
+            self.model.tb.apply_tag(&self.model.def_tag, &line_iter, &end_iter);
+            self.model.maps.marks.insert(hash, mark);
         }
+        self.model.maps.view.insert(hash);
+        self.model.maps.in_buffer.insert(hash);
+        self.model.maps.names.insert(name.clone(), hash);
+        self.model.maps.namespace.insert(hash, (name, args));
+        self.get_def(&hash, &hash);
     }
 
     fn hash_expr(&mut self, expr: PyExpr) -> Hash {
@@ -359,6 +359,9 @@ impl Widget for Win {
         }
     }
 
+
+    // Note that the ast module's line numbers are 1 based,
+    // while gtk TextIter objects are 0 based.
     fn hash_def(&mut self, def: &PyAny, offset: i32) -> PyResult<()> {
         let args = def.getattr("args")?.getattr("args")?.iter()?.map(|x| {
             Ok(x?.getattr("arg")?.extract()?)
@@ -370,13 +373,17 @@ impl Widget for Win {
                 let name = b.getattr("targets")?.get_item(0)?.getattr("id")?.extract()?;
                 let val = self.hash_val(b.getattr("value")?, &args)?;
                 let line : i32 = b.getattr("lineno")?.extract()?;
-                self.add_def(name, None, val, line + offset - 1);
+                let line_end : i32 = b.getattr("end_lineno")?.extract()?;
+                eprintln!("LINE {} offset {} end {}", line, offset, line_end);
+                self.add_def(name, None, val, line + offset - 1, line_end + offset - 1);
             } else if ty == self.model.ast_ptrs.ret_ty {
                 let name = def.getattr("name")?.extract()?;
                 let val = self.hash_val(b.getattr("value")?, &args)?;
                 let lam_val = self.hash_expr(PyExpr::Lam(args.len(), val));
                 let line : i32 = def.getattr("lineno")?.extract()?;
-                self.add_def(name, Some(args), lam_val, line + offset - 1);
+                let line_end : i32 = def.getattr("end_lineno")?.extract()?;
+                eprintln!("LINE {} offset {} end {}", line, offset, line_end);
+                self.add_def(name, Some(args), lam_val, line + offset - 1, line_end + offset);
                 return Ok(())
             } 
         }
@@ -393,7 +400,16 @@ impl Widget for Win {
         Ok(())
     }
 
-    // Get the ast of a definition
+    fn delete_region(&self, mark: &sourceview::Mark) -> gtk::TextIter {
+        let mut start_iter = self.model.tb.get_iter_at_mark(mark);
+        let mut end_iter = start_iter.clone();
+        end_iter.forward_to_tag_toggle(Some(&self.model.def_tag));
+        eprintln!("DELETING TEXT {}", start_iter.get_text(&end_iter).unwrap().as_str());
+        self.model.tb.delete(&mut start_iter, &mut end_iter);
+        start_iter
+    }
+
+    // Replace the defintion at `tip` in the buffer with the autoformatted definition for `h`
     fn get_def(&self, h: &Hash, tip: &Hash) {
         eprintln!("REPLACING DEF");
         let gil = Python::acquire_gil();
@@ -409,21 +425,13 @@ impl Widget for Win {
         };
         let txt: String = self.model.mods.unparse.call_method1(py, "unparse", (obj,)).unwrap().extract(py).unwrap();
         eprintln!("Looking up {:?} in marks", tip);
-        match self.model.maps.marks.get(tip) {
-            Some((mark, _)) => {
-                let mut start_iter = self.model.tb.get_iter_at_mark(mark);
-                let mut end_iter = start_iter.clone();
-                end_iter.forward_to_tag_toggle(Some(&self.model.def_tag));
-                eprintln!("DELETING TEXT {}", start_iter.get_text(&end_iter).unwrap().as_str());
-                self.model.tb.begin_user_action();
-                self.model.tb.delete(&mut start_iter, &mut end_iter);
-                self.model.tb.insert(&mut start_iter, txt.trim_start());
-                let def_iter = self.model.tb.get_iter_at_mark(mark);
-                self.model.tb.apply_tag(&self.model.def_tag, &def_iter, &start_iter);
-                self.model.tb.end_user_action();
-            },
-            None => eprintln!("could not find mark")
-        }
+        let mark = self.model.maps.marks.get(tip).unwrap();
+        let mut start_iter = self.delete_region(mark);
+        let trimmed = txt.trim_start();
+        eprintln!("PUTTING STRING\n{}", trimmed);
+        self.model.tb.insert(&mut start_iter, trimmed);
+        let def_iter = self.model.tb.get_iter_at_mark(mark);
+        self.model.tb.apply_tag(&self.model.def_tag, &def_iter, &start_iter);
     }
 
     fn get_text_ref(&self, py: Python, h: &Hash, oargs: &Option<Vec<String>>) -> PyObject {
@@ -456,14 +464,15 @@ impl Widget for Win {
                     let py = gil.python();
                     let mut prev_changed_marks = Vec::new();
                     mem::swap(&mut self.model.changed_marks, &mut prev_changed_marks);
+                    eprintln!("{} new regions:", prev_changed_marks.len());
                     for mark in prev_changed_marks.iter() {
                         let region_start = self.model.tb.get_iter_at_mark(mark);
                         let mut region_end = region_start.clone();
                         self.model.tb.delete_mark(mark);
                         region_end.forward_to_tag_toggle(Some(&self.model.def_tag));
                         for gstr in region_start.get_text(&region_end).into_iter() {
-                            eprintln!("STRING:\n{}", gstr.as_str());
-                            self.parse_str(py, gstr, 0).unwrap_or_else(|e| e.print(py))
+                            eprintln!("PARSING STRING:\n{}", gstr.as_str());
+                            self.parse_str(py, gstr, region_start.get_line()).unwrap_or_else(|e| e.print(py))
                         }
                     }
                 }
@@ -487,7 +496,6 @@ impl Widget for Win {
                 region_start.backward_to_tag_toggle(Some(&self.model.def_tag));
                 let len = self.model.tb.get_source_marks_at_iter(&mut region_start, Some("update")).len();
                 if len == 0 {
-                    eprintln!("GOT {:?}", region_start);
                     let region_mark = self.model.tb.create_source_mark(None, "update", &region_start).unwrap();
                     self.model.changed_marks.push(region_mark);
                 }
@@ -516,6 +524,8 @@ impl Widget for Win {
                 auto_indent: true,
                 indent_on_tab: true,
                 smart_backspace: true,
+                show_line_numbers: true,
+                tab_width: 4,
                 indent_width: 4,
             },
             delete_event(_, _) => (WinMsg::Quit, gtk::Inhibit(false))
