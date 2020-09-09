@@ -16,6 +16,14 @@ use pyo3::conversion::AsPyPointer;
 use sha2::{Sha256, Digest};
 use serde::{Serialize};
 
+// Next step: replace required global defs.
+// If we make a function that depends on D, then change it, then delete D, then change it back,
+// we should get D back.
+
+// After that: handle local defs. Order them according to a topological sort.
+
+// After that: handle tests and snippet execution
+
 type Hash = [u8; 32];
 
 #[derive(Serialize, Debug)]
@@ -358,7 +366,6 @@ impl Widget for Win {
             exceptions::TypeError::into(msg)
         }
     }
-
 
     // Note that the ast module's line numbers are 1 based,
     // while gtk TextIter objects are 0 based.
