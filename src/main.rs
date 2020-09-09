@@ -16,12 +16,6 @@ use pyo3::conversion::AsPyPointer;
 use sha2::{Sha256, Digest};
 use serde::{Serialize};
 
-// TODO: prevent double-parsing on retrieval. There doesn't seem to be a good way of doing this.
-// We can do a hack: record whatever hash we're about to modify. Modifications occur one by one.
-// When we respond to a BufferUpdate, check if it's the one we just modified.
-// If it is, don't add it to the set, and clear the warning hash
-
-
 type Hash = [u8; 32];
 
 #[derive(Serialize, Debug)]
@@ -214,7 +208,12 @@ pub struct Model {
     relm: Relm<Win>,
     last_update: Instant,
     ast_ptrs: ASTPtrs,
-    mods: PyMods
+    mods: PyMods,
+
+    // When we reformat a section, gtk still calls the 'changed' signal on the buffer.
+    // A reformat operation has two parts- a deletion and an insertion. The u8
+    // at the given mark tells us how many updates to ignore because they come from this signal
+    reformatted: Option<(sourceview::Mark, u8)>
 }
 
 #[derive(Msg)]
@@ -266,6 +265,7 @@ impl Widget for Win {
             last_update: Instant::now(),
             ast_ptrs: ptrs,
             mods: mods,
+            reformatted: None
         }
     }
 
@@ -410,7 +410,7 @@ impl Widget for Win {
     }
 
     // Replace the defintion at `tip` in the buffer with the autoformatted definition for `h`
-    fn get_def(&self, h: &Hash, tip: &Hash) {
+    fn get_def(&mut self, h: &Hash, tip: &Hash) {
         eprintln!("REPLACING DEF");
         let gil = Python::acquire_gil();
         let py = gil.python();
@@ -426,6 +426,7 @@ impl Widget for Win {
         let txt: String = self.model.mods.unparse.call_method1(py, "unparse", (obj,)).unwrap().extract(py).unwrap();
         eprintln!("Looking up {:?} in marks", tip);
         let mark = self.model.maps.marks.get(tip).unwrap();
+        self.model.reformatted = Some((mark.clone(), 2));
         let mut start_iter = self.delete_region(mark);
         let trimmed = txt.trim_start();
         eprintln!("PUTTING STRING\n{}", trimmed);
@@ -494,6 +495,16 @@ impl Widget for Win {
                 let ins_mark = self.model.tb.get_insert().unwrap();
                 let mut region_start = self.model.tb.get_iter_at_mark(&ins_mark);
                 region_start.backward_to_tag_toggle(Some(&self.model.def_tag));
+                if let Some((m,cnt)) = self.model.reformatted.as_mut() {
+                    if self.model.tb.get_iter_at_mark(m) == region_start {
+                        if *cnt == 1 {
+                            self.model.reformatted = None;
+                        } else {
+                            *cnt -= 1;
+                        }
+                    }
+                    return ()
+                }
                 let len = self.model.tb.get_source_marks_at_iter(&mut region_start, Some("update")).len();
                 if len == 0 {
                     let region_mark = self.model.tb.create_source_mark(None, "update", &region_start).unwrap();
