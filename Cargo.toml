@@ -14,6 +14,8 @@ sha2 = ""
 relm = "^0.20.0"
 bincode = ""
 relm-derive = "^0.20.0"
+gtk-test = ""
+relm-test = ""
 
 [dependencies.serde]
 version = "1.0"
@@ -30,3 +32,4 @@ features = ["v2_44"]
 [dependencies.sourceview]
 version = "0.9.0"
 features = ["v3_24"]
+

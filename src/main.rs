@@ -3,7 +3,7 @@ use gtk::prelude::*;
 use gtk::Orientation::Horizontal;
 use gtk::WidgetExt;
 use glib::GString;
-use sourceview::{LanguageManagerExt, ViewExt, BufferExt, MarkExt};
+use sourceview::{LanguageManagerExt, ViewExt, BufferExt};
 use std::default::Default;
 use std::collections::{HashMap, HashSet};
 use std::time::{Instant, Duration};
@@ -15,6 +15,8 @@ use pyo3::ffi;
 use pyo3::conversion::AsPyPointer;
 use sha2::{Sha256, Digest};
 use serde::{Serialize};
+
+// TODO: add a unit test
 
 // Next step: replace required global defs.
 // If we make a function that depends on D, then change it, then delete D, then change it back,
@@ -553,4 +555,38 @@ impl Widget for Win {
 
 fn main() {
     Win::run(()).unwrap();
+}
+
+#[cfg(test)]
+mod tests {
+use gtk::prelude::*;
+
+#[test]
+fn gui_tests() {
+    let (_component, result) = relm::init_test::<crate::Win>(()).unwrap();
+    let main_view = result.view;
+    let orig = "def foo(x,y): return x\n";
+    let mut formatted = "def foo(x, y):\n    return x\n".to_owned();
+    relm_test::enter_keys(&main_view, orig);
+    gtk_test::wait(700);
+    let b = main_view.get_buffer().unwrap();
+    let result = b.get_text(&b.get_start_iter(), &b.get_end_iter(), false).unwrap();
+    assert_eq!(result.as_str(), formatted);
+
+    let orig2 = "def bar(x,y):    return foo(x,x)";
+    let formatted2 = "def bar(x, y):\n    return foo(x, x)\n";
+    relm_test::key_press(&main_view, gdk::keys::constants::Shift_L);
+    relm_test::key_press(&main_view, gdk::keys::constants::Tab);
+    relm_test::key_release(&main_view, gdk::keys::constants::Tab);
+    relm_test::key_release(&main_view, gdk::keys::constants::Shift_L);
+    relm_test::enter_keys(&main_view, orig2);
+    gtk_test::wait(700);
+    let b = main_view.get_buffer().unwrap();
+    let result = b.get_text(&b.get_start_iter(), &b.get_end_iter(), false).unwrap();
+    formatted.push_str(formatted2);
+    assert_eq!(result.as_str(), formatted);
+}
+
+
+
 }
